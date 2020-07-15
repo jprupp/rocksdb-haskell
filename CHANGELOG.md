@@ -1,9 +1,15 @@
+## Unreleased
+ * Fork and massive incompatible refactoring of entire project
+
+
 ## 1.0.1
  * Add support for UTF-8 characters in a database's path
+
 
 ## 1.0.0
 
  * First version by Serokell
+
 
 ## 0.3x.0
 
