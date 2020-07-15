@@ -1,13 +1,14 @@
 name:                rocksdb-haskell
 version:             1.0.1
 synopsis:            Haskell bindings to RocksDB
-homepage:            http://github.com/serokell/rocksdb-haskell
-bug-reports:         http://github.com/serokell/rocksdb-haskell/issues
+homepage:            http://github.com/jprupp/rocksdb-haskell
+bug-reports:         http://github.com/jprupp/rocksdb-haskell/issues
 license:             BSD3
 license-file:        LICENSE
-author:              Kim Altintop, Alexander Thiemann et.al. (see AUTHORS file)
-maintainer:          Serokell <hi@serokell.io>
-copyright:           Copyright (c) 2012-2014 The leveldb-haskell Authors, Copyright (c) 2014 The rocksdb-haskell Authors
+author:              Jean-Pierre Rupp, Kim Altintop, Alexander Thiemann et.al. (see AUTHORS file)
+maintainer:          Jean-Pierre Rupp <jprupp@protonmail.ch>
+copyright:           Copyright (c) 2012-2014 The leveldb-haskell Authors
+                     Copyright (c) 2014-2020 The rocksdb-haskell Authors
 category:            Database, FFI
 stability:           Experimental
 build-type:          Simple
@@ -16,9 +17,11 @@ tested-with:         GHC == 8.0.1
 description:
     From <http://rocksdb.org>:
     .
-    RocksDB is an embeddable persistent key-value store for fast storage. RocksDB can also be the foundation for a client-server database but our current focus is on embedded workloads.
+    RocksDB is an embeddable persistent key-value store for fast storage.
     .
-    RocksDB builds on LevelDB to be scalable to run on servers with many CPU cores, to efficiently use fast storage, to support IO-bound, in-memory and write-once workloads, and to be flexible to allow for innovation.
+    RocksDB builds on LevelDB to be scalable to run on servers with many CPU cores,
+    to efficiently use fast storage, to support IO-bound, in-memory and
+    write-once workloads, and to be flexible and allow for innovation.
 extra-source-files:  README.md, AUTHORS
 
 source-repository head
@@ -31,7 +34,6 @@ library
                   , Database.RocksDB.C
                   , Database.RocksDB.Internal
                   , Database.RocksDB.Iterator
-                  , Database.RocksDB.Types
 
   default-language: Haskell2010
   other-extensions: CPP
@@ -47,6 +49,7 @@ library
                   , filepath
                   , resourcet > 0.3.2
                   , transformers
+                  , unliftio
 
   ghc-options:      -Wall -funbox-strict-fields
 

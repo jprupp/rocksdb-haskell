@@ -1,15 +1,5 @@
-flags: {}
-
-extra-package-dbs: []
-
-packages:
-- '.'
-
-extra-deps:
-- QuickCheck-2.10.1 #This is only until a version of 'QuickCheck' that exports
-                    #'UnicodeString' (2.10.1 is the first) is available in LTS.
-
-resolver: lts-9.14
-
+resolver: lts-16.5
 nix:
-    packages: [rocksdb,gmp]
+  packages:
+    - rocksdb
+    - gmp
