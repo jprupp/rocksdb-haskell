@@ -12,6 +12,7 @@
 module Database.RocksDB.Internal
     ( Options (..)
     , Config (..)
+    , DB (..)
     , RocksDB
     , ColumnFamily
     , ReadOpts
@@ -41,6 +42,11 @@ import           System.IO.Unsafe
 import           UnliftIO
 import           UnliftIO.Foreign
 
+data DB = DB { rocksDB        :: !RocksDB
+             , options        :: !Options
+             , columnFamilies :: ![(ColumnFamily, Options)]
+             }
+
 type RocksDB       = ForeignPtr LRocksDB
 type Options'      = ForeignPtr LOptions
 type ColumnFamily  = ForeignPtr LColumnFamily
@@ -68,7 +74,7 @@ instance Default Config where
                  }
 
 data Options = Options { config        :: !Config
-                       , options       :: !Options'
+                       , options'      :: !Options'
                        , prefixExtract :: !(Maybe PrefixExtract)
                        }
 
@@ -98,9 +104,9 @@ newOptions config@Config {..} = liftIO $ do
                 newForeignPtr
                 c_rocksdb_slicetransform_destroy
                 pfx_extract_ptr
-    options <- newForeignPtr
-               c_rocksdb_options_destroy
-               opts_ptr
+    options' <- newForeignPtr
+                c_rocksdb_options_destroy
+                opts_ptr
     return Options {..}
 
 withReadOpts :: MonadUnliftIO m => ReadOpts -> (Ptr LReadOpts -> m a) -> m a

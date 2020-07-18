@@ -86,11 +86,6 @@ data BatchOp = Put !ByteString !ByteString
              | DelCF !ColumnFamily !ByteString
              deriving (Eq, Show)
 
-data DB = DB { rocksDB        :: !RocksDB
-             , options        :: !Options
-             , columnFamilies :: ![(ColumnFamily, Options)]
-             }
-
 -- | Create a 'BloomFilter'
 bloomFilter :: MonadIO m => Int -> m BloomFilter
 bloomFilter i = liftIO $ do
@@ -111,7 +106,7 @@ open :: MonadIO m => FilePath -> Options -> m DB
 open path opts@Options {..} = liftIO $ do
     when (createIfMissing config) $ createDirectoryIfMissing True path
     withFilePath path $ \path_ptr ->
-        withForeignPtr options $ \opts_ptr -> do
+        withForeignPtr options' $ \opts_ptr -> do
             db_ptr <- throwIfErr "open" $ c_rocksdb_open opts_ptr path_ptr
             db_fptr <- newForeignPtr c_rocksdb_close db_ptr
             return $ DB db_fptr opts []
@@ -153,14 +148,14 @@ destroy :: MonadIO m => FilePath -> Options -> m ()
 destroy path Options {..} =
     liftIO $
     withFilePath path $ \path_ptr ->
-    withForeignPtr options $ \opts_ptr ->
+    withForeignPtr options' $ \opts_ptr ->
     throwIfErr "destroy" $ c_rocksdb_destroy_db opts_ptr path_ptr
 
 -- | Repair the given RocksDB database.
 repair :: MonadIO m => FilePath -> Options -> m ()
 repair path Options {..} = liftIO $
     withFilePath path $ \path_ptr ->
-    withForeignPtr options $ \opts_ptr ->
+    withForeignPtr options' $ \opts_ptr ->
     throwIfErr "repair" $ c_rocksdb_repair_db opts_ptr path_ptr
 
 

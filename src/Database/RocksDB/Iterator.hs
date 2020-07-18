@@ -52,8 +52,8 @@ data Iterator = Iterator !Iterator' !ReadOpts
 -- Note that an 'Iterator' creates a snapshot of the database implicitly, so
 -- updates written after the iterator was created are not visible. You may,
 -- however, specify an older 'Snapshot' in the 'ReadOptions'.
-createIter :: MonadIO m => RocksDB -> ReadOpts -> m Iterator
-createIter db ropts =
+createIter :: MonadIO m => DB -> ReadOpts -> m Iterator
+createIter DB { rocksDB = db } ropts =
     liftIO $
     withForeignPtr db $ \db_ptr ->
     withReadOpts ropts $ \ropts_ptr -> do
