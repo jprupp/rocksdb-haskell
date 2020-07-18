@@ -20,15 +20,13 @@ initializeDB path = do
 
 main :: IO ()
 main =  do
-  wopts <- liftIO defaultWriteOpts
-  ropts <- liftIO defaultReadOpts
   hspec $ do
     describe "Basic DB Functionality" $ do
       it "should put items into the database and retrieve them" $  do
         runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
           db <- initializeDB path
-          put db wopts "zzz" "zzz"
-          get db ropts "zzz"
+          put db "zzz" "zzz"
+          get db "zzz"
         `shouldReturn` (Just "zzz")
 
       it "should put items into a database whose filepath has unicode characters and\
@@ -36,6 +34,6 @@ main =  do
         runResourceT $ withSystemTempDirectory "rocksdb" $ \path -> do
           unicode <- getUnicodeString <$> liftIO (generate arbitrary)
           db <- initializeDB $ path ++ unicode
-          put db wopts "zzz" "zzz"
-          get db ropts "zzz"
+          put db "zzz" "zzz"
+          get db "zzz"
         `shouldReturn` (Just "zzz")

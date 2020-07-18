@@ -27,26 +27,19 @@ module Database.RocksDB.Base
     , defaultOptions
     , ReadOpts
     , newReadOpts
-    , defaultReadOpts
     , WriteOpts
-    , newWriteOpts
-    , defaultWriteOpts
+    , writeOpts
 
     -- * Basic Database Manipulations
     , open
     , withRocksDB
-    , close
     , put
-    , putBinaryVal
-    , putBinary
     , delete
     , write
     , get
-    , getBinary
-    , getBinaryVal
-    , withSnapshot
+    , getReadOpts
     , createSnapshot
-    , releaseSnapshot
+    , withSnapshot
 
     -- * Filter Policy / Bloom Filter
     , BloomFilter
@@ -59,32 +52,28 @@ module Database.RocksDB.Base
     , repair
     , approximateSize
 
-    -- * Utility functions to help perform mass writes
-    , binaryToBS
-    , bsToBinary
-
     -- * Iteration
     , module Database.RocksDB.Iterator
     ) where
 
 import           Control.Monad             (when, (>=>))
-import           Data.Binary               (Binary)
-import qualified Data.Binary               as Binary
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import           Data.ByteString.Internal  (ByteString (..))
-import qualified Data.ByteString.Lazy      as BSL
 import qualified Data.ByteString.Unsafe    as BU
+import           Data.Default
 import           Database.RocksDB.C
 import           Database.RocksDB.Internal
 import           Database.RocksDB.Iterator
 import           Foreign
 import           Foreign.C.String          (CString, withCString)
+import qualified Foreign.Concurrent        as F
 import qualified GHC.Foreign               as GHC
 import qualified GHC.IO.Encoding           as GHC
 import           System.Directory          (createDirectoryIfMissing)
 import           UnliftIO
 
+type Snapshot = ForeignPtr LSnapshot
 type BloomFilter = ForeignPtr LBloomFilter
 
 -- | Properties exposed by RocksDB
@@ -110,6 +99,10 @@ bloomFilter i = liftIO $ do
 
 withRocksDB :: MonadUnliftIO m => FilePath -> Options -> (DB -> m a) -> m a
 withRocksDB path opts = bracket (open path opts) close
+  where
+    close (DB db_fptr _ col_fams) = liftIO $ do
+        mapM_ (finalizeForeignPtr . fst) col_fams
+        finalizeForeignPtr db_fptr
 
 -- | Open a database.
 --
@@ -123,37 +116,21 @@ open path opts@Options {..} = liftIO $ do
             db_fptr <- newForeignPtr c_rocksdb_close db_ptr
             return $ DB db_fptr opts []
 
--- | Close a database.
---
--- The handle will be invalid after calling this action and should no
--- longer be used.
-close :: MonadIO m => DB -> m ()
-close DB {..} = liftIO $ do
-    mapM_ (finalizeForeignPtr . fst) columnFamilies
-    finalizeForeignPtr rocksDB
-
-
 -- | Run an action with a 'Snapshot' of the database.
 withSnapshot :: MonadUnliftIO m => DB -> (Snapshot -> m a) -> m a
 withSnapshot db =
-    bracket (createSnapshot db) (releaseSnapshot db)
+    bracket (createSnapshot db) (liftIO . finalizeForeignPtr)
 
 -- | Create a snapshot of the database.
 --
 -- The returned 'Snapshot' should be released with 'releaseSnapshot'.
 createSnapshot :: MonadIO m => DB -> m Snapshot
 createSnapshot DB {..} =
-    liftIO $ withForeignPtr rocksDB $ \db_ptr ->
-    c_rocksdb_create_snapshot db_ptr
-
--- | Release a snapshot.
---
--- The handle will be invalid after calling this action and should no
--- longer be used.
-releaseSnapshot :: MonadIO m => DB -> Snapshot -> m ()
-releaseSnapshot DB {..} snap =
-    liftIO $ withForeignPtr rocksDB $ \db_ptr ->
-    c_rocksdb_release_snapshot db_ptr snap
+    liftIO $ do
+        snap_ptr <- withForeignPtr rocksDB c_rocksdb_create_snapshot
+        let fin = withForeignPtr rocksDB $ \db_ptr ->
+                  c_rocksdb_release_snapshot db_ptr snap_ptr
+        F.newForeignPtr snap_ptr fin
 
 -- | Get a DB property.
 getProperty :: MonadIO m => DB -> Property -> m (Maybe ByteString)
@@ -210,35 +187,25 @@ approximateSize DB {..} (from, to) = liftIO $
     where
         toInt64 = return . fromIntegral
 
-putBinaryVal :: (MonadIO m, Binary v) => DB -> WriteOpts -> ByteString -> v -> m ()
-putBinaryVal db wopts key val = put db wopts key (binaryToBS val)
-
-putBinary :: (MonadIO m, Binary k, Binary v) => DB -> WriteOpts -> k -> v -> m ()
-putBinary db wopts key val = put db wopts (binaryToBS key) (binaryToBS val)
-
 -- | Write a key/value pair.
-put :: MonadIO m => DB -> WriteOpts -> ByteString -> ByteString -> m ()
-put DB {..} opts key value = liftIO $
+put :: MonadIO m => DB -> ByteString -> ByteString -> m ()
+put DB {..} key value = liftIO $
     withForeignPtr rocksDB $ \db_ptr ->
-    withForeignPtr opts $ \opts_ptr ->
     BU.unsafeUseAsCStringLen key   $ \(key_ptr, klen) ->
     BU.unsafeUseAsCStringLen value $ \(val_ptr, vlen) ->
         throwIfErr "put"
-            $ c_rocksdb_put db_ptr opts_ptr
+            $ c_rocksdb_put db_ptr writeOpts
                             key_ptr (intToCSize klen)
                             val_ptr (intToCSize vlen)
 
-getBinaryVal :: (Binary v, MonadIO m) => DB -> ReadOpts -> ByteString -> m (Maybe v)
-getBinaryVal db ropts key  = fmap bsToBinary <$> get db ropts key
-
-getBinary :: (MonadIO m, Binary k, Binary v) => DB -> ReadOpts -> k -> m (Maybe v)
-getBinary db ropts key = fmap bsToBinary <$> get db ropts (binaryToBS key)
+get :: MonadIO m => DB -> ByteString -> m (Maybe ByteString)
+get db = getReadOpts db def
 
 -- | Read a value by key.
-get :: MonadIO m => DB -> ReadOpts -> ByteString -> m (Maybe ByteString)
-get DB {..} opts key = liftIO $
+getReadOpts :: MonadIO m => DB -> ReadOpts -> ByteString -> m (Maybe ByteString)
+getReadOpts DB {..} ropts key = liftIO $
     withForeignPtr rocksDB $ \db_ptr ->
-    withForeignPtr opts $ \opts_ptr ->
+    withReadOpts ropts $ \opts_ptr ->
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
     alloca                       $ \vlen_ptr -> do
         val_ptr <- throwIfErr "get" $
@@ -252,24 +219,22 @@ get DB {..} opts key = liftIO $
                 return res'
 
 -- | Delete a key/value pair.
-delete :: MonadIO m => DB -> WriteOpts -> ByteString -> m ()
-delete DB {..} opts key = liftIO $
+delete :: MonadIO m => DB -> ByteString -> m ()
+delete DB {..} key = liftIO $
     withForeignPtr rocksDB $ \db_ptr ->
-    withForeignPtr opts $ \opts_ptr ->
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
         throwIfErr "delete"
-            $ c_rocksdb_delete db_ptr opts_ptr key_ptr (intToCSize klen)
+            $ c_rocksdb_delete db_ptr writeOpts key_ptr (intToCSize klen)
 
 -- | Perform a batch mutation.
-write :: MonadIO m => DB -> WriteOpts -> [BatchOp] -> m ()
-write DB {..} opts batch = liftIO $
+write :: MonadIO m => DB -> [BatchOp] -> m ()
+write DB {..} batch = liftIO $
     withForeignPtr rocksDB $ \db_ptr ->
-    withForeignPtr opts $ \opts_ptr ->
     bracket c_rocksdb_writebatch_create c_rocksdb_writebatch_destroy $ \batch_ptr -> do
 
     mapM_ (batchAdd batch_ptr) batch
 
-    throwIfErr "write" $ c_rocksdb_write db_ptr opts_ptr batch_ptr
+    throwIfErr "write" $ c_rocksdb_write db_ptr writeOpts batch_ptr
 
     -- ensure @ByteString@s (and respective shared @CStringLen@s) aren't GC'ed
     -- until here
@@ -325,12 +290,6 @@ createBloomFilter :: MonadIO m => Int -> m BloomFilter
 createBloomFilter i = liftIO $ do
     fp_ptr <- c_rocksdb_filterpolicy_create_bloom (fromIntegral i)
     newForeignPtr c_rocksdb_filterpolicy_destroy fp_ptr
-
-binaryToBS :: Binary v => v -> ByteString
-binaryToBS x = BSL.toStrict (Binary.encode x)
-
-bsToBinary :: Binary v => ByteString -> v
-bsToBinary x = Binary.decode (BSL.fromStrict x)
 
 -- | Marshal a 'FilePath' (Haskell string) into a `NUL` terminated C string using
 -- temporary storage.

@@ -1,4 +1,4 @@
-name:                rocksdb-haskell
+name:                rocksdb-haskell-jprupp
 version:             2.0.0
 synopsis:            Haskell bindings to RocksDB
 homepage:            http://github.com/jprupp/rocksdb-haskell
@@ -42,7 +42,6 @@ library
                   , RecordWildCards
 
   build-depends:    base >= 3 && < 5
-                  , binary
                   , bytestring
                   , data-default
                   , directory
@@ -63,7 +62,7 @@ test-suite rocksdb-tests
   type: exitcode-stdio-1.0
   hs-source-dirs: tests
   build-depends:       base >= 3 && < 5
-                     , rocksdb-haskell
+                     , rocksdb-haskell-jprupp
                      , hspec >= 1.8
                      , process >= 1.1.0.2
                      , bytestring >= 0.10.4.0

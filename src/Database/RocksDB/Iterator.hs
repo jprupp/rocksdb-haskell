@@ -56,7 +56,7 @@ createIter :: MonadIO m => RocksDB -> ReadOpts -> m Iterator
 createIter db ropts =
     liftIO $
     withForeignPtr db $ \db_ptr ->
-    withForeignPtr ropts $ \ropts_ptr -> do
+    withReadOpts ropts $ \ropts_ptr -> do
         iter_ptr <- throwErrnoIfNull "create_iterator" $
                     c_rocksdb_create_iterator db_ptr ropts_ptr
         iter_fptr <- newForeignPtr c_rocksdb_iter_destroy iter_ptr

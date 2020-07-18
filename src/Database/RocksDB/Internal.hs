@@ -21,9 +21,8 @@ module Database.RocksDB.Internal
     , newOptions
     , defaultOptions
     , newReadOpts
-    , defaultReadOpts
-    , newWriteOpts
-    , defaultWriteOpts
+    , withReadOpts
+    , writeOpts
 
     -- * Utilities
     , freeCString
@@ -35,25 +34,30 @@ module Database.RocksDB.Internal
     , boolToNum
     ) where
 
-import           Control.Monad      (forM_, when)
+import           Control.Monad      (when)
 import           Data.Default
 import           Database.RocksDB.C
+import           System.IO.Unsafe
 import           UnliftIO
 import           UnliftIO.Foreign
 
 type RocksDB       = ForeignPtr LRocksDB
 type Options'      = ForeignPtr LOptions
 type ColumnFamily  = ForeignPtr LColumnFamily
-type ReadOpts      = ForeignPtr LReadOpts
-type WriteOpts     = ForeignPtr LWriteOpts
 type PrefixExtract = ForeignPtr LPrefixExtract
+type Snapshot      = ForeignPtr LSnapshot
+type WriteOpts     = Ptr LWriteOpts
+
+data ReadOpts = ReadOpts !(ForeignPtr LReadOpts) !Snapshot
+              | DefReadOpts !(Ptr LReadOpts)
+              deriving (Eq, Show)
 
 data Config = Config { createIfMissing :: !Bool
                      , errorIfExists   :: !Bool
                      , paranoidChecks  :: !Bool
                      , maxFiles        :: !(Maybe Int)
                      , prefixLength    :: !(Maybe Int)
-                     }
+                     } deriving (Eq, Show)
 
 instance Default Config where
     def = Config { createIfMissing  = False
@@ -99,24 +103,29 @@ newOptions config@Config {..} = liftIO $ do
                opts_ptr
     return Options {..}
 
-defaultWriteOpts :: MonadIO m => m WriteOpts
-defaultWriteOpts = newWriteOpts False
+withReadOpts :: MonadUnliftIO m => ReadOpts -> (Ptr LReadOpts -> m a) -> m a
+withReadOpts (ReadOpts fptr _) = withForeignPtr fptr
+withReadOpts (DefReadOpts ptr) = ($ ptr)
 
-newWriteOpts :: MonadIO m => Bool -> m WriteOpts
-newWriteOpts sync = do
-    write_opts_ptr <- liftIO c_rocksdb_writeoptions_create
-    liftIO $ c_rocksdb_writeoptions_set_sync write_opts_ptr (boolToCBool sync)
-    newForeignPtr c_rocksdb_writeoptions_destroy write_opts_ptr
+writeOpts :: WriteOpts
+writeOpts = unsafePerformIO c_rocksdb_writeoptions_create
+{-# NOINLINE writeOpts #-}
 
-defaultReadOpts :: MonadIO m => m ReadOpts
-defaultReadOpts = newReadOpts False Nothing
+defReadOpts :: ReadOpts
+defReadOpts = DefReadOpts $ unsafePerformIO c_rocksdb_readoptions_create
+{-# NOINLINE defReadOpts #-}
 
-newReadOpts :: MonadIO m => Bool -> Maybe Snapshot -> m ReadOpts
-newReadOpts verify snapshot = liftIO $ do
+instance Default ReadOpts where
+    def = defReadOpts
+
+newReadOpts :: MonadIO m => Maybe Snapshot -> m ReadOpts
+newReadOpts Nothing = return defReadOpts
+newReadOpts (Just snap_fptr) = liftIO $ do
     read_opts_ptr <- c_rocksdb_readoptions_create
-    c_rocksdb_readoptions_set_verify_checksums read_opts_ptr (boolToCBool verify)
-    forM_ snapshot $ c_rocksdb_readoptions_set_snapshot read_opts_ptr
-    newForeignPtr c_rocksdb_readoptions_destroy read_opts_ptr
+    withForeignPtr snap_fptr $
+        c_rocksdb_readoptions_set_snapshot read_opts_ptr
+    ropts_fptr <- newForeignPtr c_rocksdb_readoptions_destroy read_opts_ptr
+    return $ ReadOpts ropts_fptr snap_fptr
 
 freeCString :: CString -> IO ()
 freeCString = c_rocksdb_free

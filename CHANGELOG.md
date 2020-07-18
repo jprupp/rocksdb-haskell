@@ -1,8 +1,12 @@
 ## Unreleased
- * Fork and massive incompatible refactoring of entire project
+
+ * Fork into a different project
+ * Rewrite most of the code to make it faster and easier to use
+ * Remove many features that I don't need or want to maintain
 
 
 ## 1.0.1
+
  * Add support for UTF-8 characters in a database's path
 
 

@@ -27,8 +27,6 @@ data LWriteOpts
 data LBloomFilter
 data LPrefixExtract
 
-type Snapshot = Ptr LSnapshot
-
 type DBName = CString
 type CFName = CString
 type ErrPtr = Ptr CString
@@ -126,10 +124,10 @@ foreign import ccall safe "rocksdb/c.h rocksdb_get_cf"
                    -> IO CString
 
 foreign import ccall safe "rocksdb/c.h rocksdb_create_snapshot"
-  c_rocksdb_create_snapshot :: Ptr LRocksDB -> IO Snapshot
+  c_rocksdb_create_snapshot :: Ptr LRocksDB -> IO (Ptr LSnapshot)
 
 foreign import ccall safe "rocksdb/c.h rocksdb_release_snapshot"
-  c_rocksdb_release_snapshot :: Ptr LRocksDB -> Snapshot -> IO ()
+  c_rocksdb_release_snapshot :: Ptr LRocksDB -> Ptr LSnapshot -> IO ()
 
 -- | Returns NULL if property name is unknown. Else returns a pointer to a
 -- malloc()-ed null-terminated value.
@@ -289,9 +287,6 @@ foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_create"
 foreign import ccall safe "rocksdb/c.h &rocksdb_readoptions_destroy"
   c_rocksdb_readoptions_destroy :: FunPtr (Ptr LReadOpts -> IO ())
 
-foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_verify_checksums"
-  c_rocksdb_readoptions_set_verify_checksums :: Ptr LReadOpts -> CBool -> IO ()
-
 foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_snapshot"
   c_rocksdb_readoptions_set_snapshot :: Ptr LReadOpts -> Ptr LSnapshot -> IO ()
 
@@ -305,10 +300,6 @@ foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_create"
 
 foreign import ccall safe "rocksdb/c.h &rocksdb_writeoptions_destroy"
   c_rocksdb_writeoptions_destroy :: FunPtr (Ptr LWriteOpts -> IO ())
-
-foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_set_sync"
-  c_rocksdb_writeoptions_set_sync :: Ptr LWriteOpts -> CBool -> IO ()
-
 
 --
 -- Free
