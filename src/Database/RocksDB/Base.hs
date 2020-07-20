@@ -47,7 +47,6 @@ import           Control.Monad             ((>=>))
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import           Data.ByteString.Internal  (ByteString (..))
-import qualified Data.ByteString.Unsafe    as BU
 import           Database.RocksDB.C
 import           Database.RocksDB.Internal
 import           Database.RocksDB.Iterator
@@ -141,8 +140,8 @@ type Range  = (ByteString, ByteString)
 -- | Inspect the approximate sizes of the different levels.
 approximateSize :: MonadIO m => DB -> Range -> m Int64
 approximateSize DB{rocksDB = db_ptr} (from, to) = liftIO $
-    BU.unsafeUseAsCStringLen from $ \(from_ptr, flen) ->
-    BU.unsafeUseAsCStringLen to   $ \(to_ptr, tlen)   ->
+    BS.useAsCStringLen from $ \(from_ptr, flen) ->
+    BS.useAsCStringLen to   $ \(to_ptr, tlen)   ->
     withArray [from_ptr]          $ \from_ptrs        ->
     withArray [intToCSize flen]   $ \flen_ptrs        ->
     withArray [to_ptr]            $ \to_ptrs          ->
@@ -160,8 +159,8 @@ approximateSize DB{rocksDB = db_ptr} (from, to) = liftIO $
 -- | Write a key/value pair.
 put :: MonadIO m => DB -> ByteString -> ByteString -> m ()
 put DB{rocksDB = db_ptr, writeOpts = write_opts} key value = liftIO $
-    BU.unsafeUseAsCStringLen key   $ \(key_ptr, klen) ->
-    BU.unsafeUseAsCStringLen value $ \(val_ptr, vlen) ->
+    BS.useAsCStringLen key   $ \(key_ptr, klen) ->
+    BS.useAsCStringLen value $ \(val_ptr, vlen) ->
         throwIfErr "put"
             $ c_rocksdb_put db_ptr write_opts
                             key_ptr (intToCSize klen)
@@ -170,8 +169,8 @@ put DB{rocksDB = db_ptr, writeOpts = write_opts} key value = liftIO $
 -- | Read a value by key.
 get :: MonadIO m => DB -> ByteString -> m (Maybe ByteString)
 get DB{rocksDB = db_ptr, readOpts = read_opts} key = liftIO $
-    BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
-    alloca                       $ \vlen_ptr -> do
+    BS.useAsCStringLen key $ \(key_ptr, klen) ->
+    alloca                 $ \vlen_ptr -> do
         val_ptr <- throwIfErr "get" $
             c_rocksdb_get db_ptr read_opts key_ptr (intToCSize klen) vlen_ptr
         vlen <- peek vlen_ptr
@@ -185,7 +184,7 @@ get DB{rocksDB = db_ptr, readOpts = read_opts} key = liftIO $
 -- | Delete a key/value pair.
 delete :: MonadIO m => DB -> ByteString -> m ()
 delete DB{rocksDB = db_ptr, writeOpts = write_opts} key = liftIO $
-    BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+    BS.useAsCStringLen key $ \(key_ptr, klen) ->
         throwIfErr "delete"
             $ c_rocksdb_delete db_ptr write_opts key_ptr (intToCSize klen)
 
@@ -206,16 +205,16 @@ write DB{rocksDB = db_ptr, writeOpts = write_opts} batch = liftIO $
 
     where
         batchAdd batch_ptr (Put key val) =
-            BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
-            BU.unsafeUseAsCStringLen val $ \(val_ptr, vlen) ->
+            BS.useAsCStringLen key $ \(key_ptr, klen) ->
+            BS.useAsCStringLen val $ \(val_ptr, vlen) ->
                 c_rocksdb_writebatch_put
                 batch_ptr
                 key_ptr (intToCSize klen)
                 val_ptr (intToCSize vlen)
 
         batchAdd batch_ptr (PutCF cf_ptr key val) =
-            BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
-            BU.unsafeUseAsCStringLen val $ \(val_ptr, vlen) ->
+            BS.useAsCStringLen key $ \(key_ptr, klen) ->
+            BS.useAsCStringLen val $ \(val_ptr, vlen) ->
                 c_rocksdb_writebatch_put_cf
                 batch_ptr
                 cf_ptr
@@ -223,13 +222,13 @@ write DB{rocksDB = db_ptr, writeOpts = write_opts} batch = liftIO $
                 val_ptr (intToCSize vlen)
 
         batchAdd batch_ptr (Del key) =
-            BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+            BS.useAsCStringLen key $ \(key_ptr, klen) ->
                 c_rocksdb_writebatch_delete
                 batch_ptr
                 key_ptr (intToCSize klen)
 
         batchAdd batch_ptr (DelCF cf_ptr key) =
-            BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+            BS.useAsCStringLen key $ \(key_ptr, klen) ->
                 c_rocksdb_writebatch_delete_cf
                 batch_ptr
                 cf_ptr

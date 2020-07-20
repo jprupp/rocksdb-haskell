@@ -116,10 +116,10 @@ type CFName           = CString
 type Key              = CString
 type Val              = CString
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_open"
+foreign import ccall safe "rocksdb/c.h rocksdb_open"
   c_rocksdb_open :: Options -> DBName -> ErrPtr -> IO RocksDB
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_open_column_families"
+foreign import ccall safe "rocksdb/c.h rocksdb_open_column_families"
   c_rocksdb_open_column_families :: Options
                                  -> DBName
                                  -> CInt
@@ -129,26 +129,26 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_open_column_families"
                                  -> ErrPtr
                                  -> IO RocksDB
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_close"
+foreign import ccall safe "rocksdb/c.h rocksdb_close"
   c_rocksdb_close :: RocksDB -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_create_column_family"
+foreign import ccall safe "rocksdb/c.h rocksdb_create_column_family"
   c_rocksdb_create_column_family :: RocksDB
                                  -> Options
                                  -> CFName
                                  -> ErrPtr
                                  -> IO ColumnFamily
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_drop_column_family"
+foreign import ccall safe "rocksdb/c.h rocksdb_drop_column_family"
   c_rocksdb_drop_column_family :: RocksDB
                                -> ColumnFamily
                                -> ErrPtr
                                -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_column_family_handle_destroy"
+foreign import ccall safe "rocksdb/c.h rocksdb_column_family_handle_destroy"
   c_rocksdb_column_family_handle_destroy :: ColumnFamily -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_put"
+foreign import ccall safe "rocksdb/c.h rocksdb_put"
   c_rocksdb_put :: RocksDB
                 -> WriteOpts
                 -> Key -> CSize
@@ -156,7 +156,7 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_put"
                 -> ErrPtr
                 -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_put_cf"
+foreign import ccall safe "rocksdb/c.h rocksdb_put_cf"
   c_rocksdb_put_cf :: RocksDB
                    -> WriteOpts
                    -> ColumnFamily
@@ -165,14 +165,14 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_put_cf"
                    -> ErrPtr
                    -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_delete"
+foreign import ccall safe "rocksdb/c.h rocksdb_delete"
   c_rocksdb_delete :: RocksDB
                    -> WriteOpts
                    -> Key -> CSize
                    -> ErrPtr
                    -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_delete_cf"
+foreign import ccall safe "rocksdb/c.h rocksdb_delete_cf"
   c_rocksdb_delete_cf :: RocksDB
                       -> WriteOpts
                       -> ColumnFamily
@@ -180,7 +180,7 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_delete_cf"
                       -> ErrPtr
                       -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_write"
+foreign import ccall safe "rocksdb/c.h rocksdb_write"
   c_rocksdb_write :: RocksDB
                   -> WriteOpts
                   -> WriteBatch
@@ -189,7 +189,7 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_write"
 
 -- | Returns NULL if not found. A malloc()ed array otherwise.
 -- Stores the length of the array in *vallen.
-foreign import ccall unsafe "rocksdb/c.h rocksdb_get"
+foreign import ccall safe "rocksdb/c.h rocksdb_get"
   c_rocksdb_get :: RocksDB
                 -> ReadOpts
                 -> Key -> CSize
@@ -197,7 +197,7 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_get"
                 -> ErrPtr
                 -> IO CString
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_get_cf"
+foreign import ccall safe "rocksdb/c.h rocksdb_get_cf"
   c_rocksdb_get_cf :: RocksDB
                    -> ReadOpts
                    -> ColumnFamily
@@ -206,7 +206,7 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_get_cf"
                    -> ErrPtr
                    -> IO CString
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_multi_get"
+foreign import ccall safe "rocksdb/c.h rocksdb_multi_get"
   c_rocksdb_multi_get :: RocksDB
                       -> ReadOpts
                       -> CSize        -- ^ number of keys
@@ -217,7 +217,7 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_multi_get"
                       -> ErrPtr
                       -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_multi_get_cf"
+foreign import ccall safe "rocksdb/c.h rocksdb_multi_get_cf"
   c_rocksdb_multi_get_cf :: RocksDB
                          -> ReadOpts
                          -> Ptr ColumnFamily -- ^ column families
@@ -232,15 +232,15 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_multi_get_cf"
 foreign import ccall unsafe "rocksdb/c.h rocksdb_create_snapshot"
   c_rocksdb_create_snapshot :: RocksDB -> IO Snapshot
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_release_snapshot"
+foreign import ccall safe "rocksdb/c.h rocksdb_release_snapshot"
   c_rocksdb_release_snapshot :: RocksDB -> Snapshot -> IO ()
 
 -- | Returns NULL if property name is unknown. Else returns a pointer to a
 -- malloc()-ed null-terminated value.
-foreign import ccall unsafe "rocksdb/c.h rocksdb_property_value"
+foreign import ccall safe "rocksdb/c.h rocksdb_property_value"
   c_rocksdb_property_value :: RocksDB -> CString -> IO CString
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_approximate_sizes"
+foreign import ccall safe "rocksdb/c.h rocksdb_approximate_sizes"
   c_rocksdb_approximate_sizes :: RocksDB
                               -> CInt
                                  -- ^ num ranges
@@ -252,10 +252,10 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_approximate_sizes"
                                  -- ^ array of approx. sizes of ranges
                               -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_destroy_db"
+foreign import ccall safe "rocksdb/c.h rocksdb_destroy_db"
   c_rocksdb_destroy_db :: Options -> DBName -> ErrPtr -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_repair_db"
+foreign import ccall safe "rocksdb/c.h rocksdb_repair_db"
   c_rocksdb_repair_db :: Options -> DBName -> ErrPtr -> IO ()
 
 
@@ -263,7 +263,7 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_repair_db"
 -- Iterator
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_create_iterator"
+foreign import ccall safe "rocksdb/c.h rocksdb_create_iterator"
   c_rocksdb_create_iterator :: RocksDB
                             -> ReadOpts
                             -> IO Iterator
@@ -274,25 +274,25 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_destroy"
 foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_valid"
   c_rocksdb_iter_valid :: Iterator -> IO CUChar
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_seek_to_first"
+foreign import ccall safe "rocksdb/c.h rocksdb_iter_seek_to_first"
   c_rocksdb_iter_seek_to_first :: Iterator -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_seek_to_last"
+foreign import ccall safe "rocksdb/c.h rocksdb_iter_seek_to_last"
   c_rocksdb_iter_seek_to_last :: Iterator -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_seek"
+foreign import ccall safe "rocksdb/c.h rocksdb_iter_seek"
   c_rocksdb_iter_seek :: Iterator -> Key -> CSize -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_next"
+foreign import ccall safe "rocksdb/c.h rocksdb_iter_next"
   c_rocksdb_iter_next :: Iterator -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_prev"
+foreign import ccall safe "rocksdb/c.h rocksdb_iter_prev"
   c_rocksdb_iter_prev :: Iterator -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_key"
+foreign import ccall safe "rocksdb/c.h rocksdb_iter_key"
   c_rocksdb_iter_key :: Iterator -> Ptr CSize -> IO Key
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_value"
+foreign import ccall safe "rocksdb/c.h rocksdb_iter_value"
   c_rocksdb_iter_value :: Iterator -> Ptr CSize -> IO Val
 
 foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_get_error"
@@ -303,33 +303,33 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_get_error"
 -- Write batch
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_create"
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_create"
   c_rocksdb_writebatch_create :: IO WriteBatch
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_destroy"
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_destroy"
   c_rocksdb_writebatch_destroy :: WriteBatch -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_clear"
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_clear"
   c_rocksdb_writebatch_clear :: WriteBatch -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_put"
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_put"
   c_rocksdb_writebatch_put :: WriteBatch
                            -> Key -> CSize
                            -> Val -> CSize
                            -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_put_cf"
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_put_cf"
   c_rocksdb_writebatch_put_cf :: WriteBatch
                               -> ColumnFamily
                               -> Key -> CSize
                               -> Val -> CSize
                               -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_delete"
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_delete"
   c_rocksdb_writebatch_delete :: WriteBatch
                               -> Key -> CSize -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_delete_cf"
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_delete_cf"
   c_rocksdb_writebatch_delete_cf :: WriteBatch
                                  -> ColumnFamily
                                  -> Key
@@ -340,25 +340,25 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_writebatch_delete_cf"
 -- Options
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_options_create"
+foreign import ccall safe "rocksdb/c.h rocksdb_options_create"
   c_rocksdb_options_create :: IO Options
 
 foreign import ccall "rocksdb/c.h rocksdb_options_destroy"
   c_rocksdb_options_destroy :: Options -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_options_set_create_if_missing"
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_create_if_missing"
   c_rocksdb_options_set_create_if_missing :: Options -> CBool -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_options_set_error_if_exists"
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_error_if_exists"
   c_rocksdb_options_set_error_if_exists :: Options -> CBool -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_options_set_paranoid_checks"
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_paranoid_checks"
   c_rocksdb_options_set_paranoid_checks :: Options -> CBool -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_options_set_max_open_files"
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_max_open_files"
   c_rocksdb_options_set_max_open_files :: Options -> CInt -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_options_set_prefix_extractor"
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_prefix_extractor"
   c_rocksdb_options_set_prefix_extractor :: Options
                                          -> PrefixExtract
                                          -> IO ()
@@ -367,33 +367,33 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_options_set_prefix_extractor"
 -- Prefix Extractor
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_slicetransform_create_fixed_prefix"
+foreign import ccall safe "rocksdb/c.h rocksdb_slicetransform_create_fixed_prefix"
   c_rocksdb_slicetransform_create_fixed_prefix :: CSize -> IO PrefixExtract
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_slicetransform_destroy"
+foreign import ccall safe "rocksdb/c.h rocksdb_slicetransform_destroy"
   c_rocksdb_slicetransform_destroy :: PrefixExtract -> IO ()
 
 --
 -- Bloom Filter
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_filterpolicy_destroy"
+foreign import ccall safe "rocksdb/c.h rocksdb_filterpolicy_destroy"
   c_rocksdb_filterpolicy_destroy :: BloomFilter -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_filterpolicy_create_bloom"
+foreign import ccall safe "rocksdb/c.h rocksdb_filterpolicy_create_bloom"
   c_rocksdb_filterpolicy_create_bloom :: CInt -> IO BloomFilter
 
 --
 -- Read options
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_readoptions_create"
+foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_create"
   c_rocksdb_readoptions_create :: IO ReadOpts
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_readoptions_destroy"
+foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_destroy"
   c_rocksdb_readoptions_destroy :: ReadOpts -> IO ()
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_readoptions_set_snapshot"
+foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_snapshot"
   c_rocksdb_readoptions_set_snapshot :: ReadOpts -> Snapshot -> IO ()
 
 
@@ -401,15 +401,15 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_readoptions_set_snapshot"
 -- Write options
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writeoptions_create"
+foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_create"
   c_rocksdb_writeoptions_create :: IO WriteOpts
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_writeoptions_destroy"
+foreign import ccall safe "rocksdb/c.h rocksdb_writeoptions_destroy"
   c_rocksdb_writeoptions_destroy :: WriteOpts -> IO ()
 
 --
 -- Free
 --
 
-foreign import ccall unsafe "rocksdb/c.h rocksdb_free"
+foreign import ccall safe "rocksdb/c.h rocksdb_free"
   c_rocksdb_free :: CString -> IO ()
