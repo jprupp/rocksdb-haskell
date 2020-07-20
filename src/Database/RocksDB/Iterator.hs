@@ -151,4 +151,5 @@ iterString iter_ptr f =
                 else do
                     len <- peek len_ptr
                     ret <- BS.packCStringLen (ptr, cSizeToInt len)
+                    freeCString ptr
                     return $ Just ret
