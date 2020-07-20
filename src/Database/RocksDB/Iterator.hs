@@ -150,6 +150,4 @@ iterString iter_ptr f =
                 then return Nothing
                 else do
                     len <- peek len_ptr
-                    ret <- BS.packCStringLen (ptr, cSizeToInt len)
-                    freeCString ptr
-                    return $ Just ret
+                    Just <$> BS.packCStringLen (ptr, cSizeToInt len)
