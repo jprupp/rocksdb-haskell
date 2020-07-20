@@ -131,7 +131,6 @@ iterGetError iter_ptr = liftIO . alloca $ \err_ptr -> do
         then return Nothing
         else do
             err <- peekCString erra
-            freeCString erra
             return $ Just (BC.pack err)
 
 --
@@ -151,5 +150,4 @@ iterString iter_ptr f =
                 else do
                     len <- peek len_ptr
                     ret <- BS.packCStringLen (ptr, cSizeToInt len)
-                    freeCString ptr
                     return $ Just ret
