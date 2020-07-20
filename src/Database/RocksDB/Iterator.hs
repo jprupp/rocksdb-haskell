@@ -30,6 +30,7 @@ import           Control.Monad             (when)
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import qualified Data.ByteString.Char8     as BC
+import qualified Data.ByteString.Unsafe    as BU
 import           Database.RocksDB.C
 import           Database.RocksDB.Internal
 import           Foreign
@@ -66,7 +67,7 @@ iterValid iter_ptr = liftIO $ do
 -- comes at or past target.
 iterSeek :: MonadIO m => Iterator -> ByteString -> m ()
 iterSeek iter_ptr key = liftIO $
-    BS.useAsCStringLen key $ \(key_ptr, klen) ->
+    BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
     c_rocksdb_iter_seek iter_ptr key_ptr (intToCSize klen)
 
 -- | Position at the first key in the source. The iterator is /valid/ after this
