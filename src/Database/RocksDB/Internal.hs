@@ -10,20 +10,13 @@
 --
 
 module Database.RocksDB.Internal
-    ( Options (..)
-    , Config (..)
+    ( Config (..)
     , DB (..)
-    , RocksDB
-    , ColumnFamily
-    , ReadOpts
-    , WriteOpts
 
     -- * Smart constructors & extractors
-    , newOptions
-    , defaultOptions
-    , newReadOpts
+    , withOptions
     , withReadOpts
-    , writeOpts
+    , withWriteOpts
 
     -- * Utilities
     , freeCString
@@ -35,28 +28,15 @@ module Database.RocksDB.Internal
     , boolToNum
     ) where
 
-import           Control.Monad      (when)
+import           Control.Monad
 import           Data.Default
 import           Database.RocksDB.C
-import           System.IO.Unsafe
 import           UnliftIO
 import           UnliftIO.Foreign
 
 data DB = DB { rocksDB        :: !RocksDB
-             , options        :: !Options
-             , columnFamilies :: ![(ColumnFamily, Options)]
+             , columnFamilies :: ![ColumnFamily]
              }
-
-type RocksDB       = ForeignPtr LRocksDB
-type Options'      = ForeignPtr LOptions
-type ColumnFamily  = ForeignPtr LColumnFamily
-type PrefixExtract = ForeignPtr LPrefixExtract
-type Snapshot      = ForeignPtr LSnapshot
-type WriteOpts     = Ptr LWriteOpts
-
-data ReadOpts = ReadOpts !(ForeignPtr LReadOpts) !Snapshot
-              | DefReadOpts !(Ptr LReadOpts)
-              deriving (Eq, Show)
 
 data Config = Config { createIfMissing :: !Bool
                      , errorIfExists   :: !Bool
@@ -73,65 +53,50 @@ instance Default Config where
                  , prefixLength     = Nothing
                  }
 
-data Options = Options { config        :: !Config
-                       , options'      :: !Options'
-                       , prefixExtract :: !(Maybe PrefixExtract)
-                       }
-
-defaultOptions :: MonadIO m => m Options
-defaultOptions = newOptions def
-
-newOptions :: MonadIO m => Config -> m Options
-newOptions config@Config {..} = liftIO $ do
-    opts_ptr <- c_rocksdb_options_create
-    c_rocksdb_options_set_create_if_missing
-        opts_ptr (boolToCBool createIfMissing)
-    c_rocksdb_options_set_error_if_exists
-        opts_ptr (boolToCBool errorIfExists)
-    c_rocksdb_options_set_paranoid_checks
-        opts_ptr (boolToCBool paranoidChecks)
-    case maxFiles of
-        Nothing -> return ()
-        Just n  -> c_rocksdb_options_set_max_open_files
-                   opts_ptr
-                   (intToCInt n)
-    prefixExtract <- case prefixLength of
-        Nothing -> return Nothing
-        Just n -> do
-            pfx_extract_ptr <- c_rocksdb_slicetransform_create_fixed_prefix
+withOptions :: MonadUnliftIO m => Config -> (Options -> m a) -> m a --
+withOptions Config {..} f =
+    bracket create_opts destroy_opts (f . fst)
+  where
+    destroy_opts (opts_ptr, maybe_pfx_extract) = liftIO $ do
+        c_rocksdb_options_destroy opts_ptr
+        forM_ maybe_pfx_extract c_rocksdb_slicetransform_destroy
+    create_opts = liftIO $ do
+        opts_ptr <- c_rocksdb_options_create
+        c_rocksdb_options_set_create_if_missing
+            opts_ptr (boolToCBool createIfMissing)
+        c_rocksdb_options_set_error_if_exists
+            opts_ptr (boolToCBool errorIfExists)
+        c_rocksdb_options_set_paranoid_checks
+            opts_ptr (boolToCBool paranoidChecks)
+        case maxFiles of
+            Nothing -> return ()
+            Just n  -> c_rocksdb_options_set_max_open_files
+                      opts_ptr
+                      (intToCInt n)
+        maybe_pfx_extract <- case prefixLength of
+            Nothing -> return Nothing
+            Just n -> do
+                pfx_extract <- c_rocksdb_slicetransform_create_fixed_prefix
                                (intToCSize n)
-            Just <$>
-                newForeignPtr
-                c_rocksdb_slicetransform_destroy
-                pfx_extract_ptr
-    options' <- newForeignPtr
-                c_rocksdb_options_destroy
-                opts_ptr
-    return Options {..}
+                return $ Just pfx_extract
+        return (opts_ptr, maybe_pfx_extract)
 
-withReadOpts :: MonadUnliftIO m => ReadOpts -> (Ptr LReadOpts -> m a) -> m a
-withReadOpts (ReadOpts fptr _) = withForeignPtr fptr
-withReadOpts (DefReadOpts ptr) = ($ ptr)
+withReadOpts :: MonadUnliftIO m => Maybe Snapshot -> (ReadOpts -> m a) -> m a
+withReadOpts maybe_snap_ptr =
+    bracket
+    create_read_opts
+    (liftIO . c_rocksdb_readoptions_destroy)
+  where
+    create_read_opts = liftIO $ do
+        read_opts_ptr <- c_rocksdb_readoptions_create
+        forM_ maybe_snap_ptr $ c_rocksdb_readoptions_set_snapshot read_opts_ptr
+        return read_opts_ptr
 
-writeOpts :: WriteOpts
-writeOpts = unsafePerformIO c_rocksdb_writeoptions_create
-{-# NOINLINE writeOpts #-}
-
-defReadOpts :: ReadOpts
-defReadOpts = DefReadOpts $ unsafePerformIO c_rocksdb_readoptions_create
-{-# NOINLINE defReadOpts #-}
-
-instance Default ReadOpts where
-    def = defReadOpts
-
-newReadOpts :: MonadIO m => Maybe Snapshot -> m ReadOpts
-newReadOpts Nothing = return defReadOpts
-newReadOpts (Just snap_fptr) = liftIO $ do
-    read_opts_ptr <- c_rocksdb_readoptions_create
-    withForeignPtr snap_fptr $
-        c_rocksdb_readoptions_set_snapshot read_opts_ptr
-    ropts_fptr <- newForeignPtr c_rocksdb_readoptions_destroy read_opts_ptr
-    return $ ReadOpts ropts_fptr snap_fptr
+withWriteOpts :: MonadUnliftIO m => (WriteOpts -> m a) -> m a
+withWriteOpts =
+    bracket
+    (liftIO c_rocksdb_writeoptions_create)
+    (liftIO . c_rocksdb_writeoptions_destroy)
 
 freeCString :: CString -> IO ()
 freeCString = c_rocksdb_free
