@@ -36,6 +36,8 @@ import           UnliftIO.Foreign
 
 data DB = DB { rocksDB        :: !RocksDB
              , columnFamilies :: ![ColumnFamily]
+             , readOpts       :: !ReadOpts
+             , writeOpts      :: !WriteOpts
              }
 
 data Config = Config { createIfMissing :: !Bool
@@ -53,7 +55,7 @@ instance Default Config where
                  , prefixLength     = Nothing
                  }
 
-withOptions :: MonadUnliftIO m => Config -> (Options -> m a) -> m a --
+withOptions :: MonadUnliftIO m => Config -> (Options -> m a) -> m a
 withOptions Config {..} f =
     bracket create_opts destroy_opts (f . fst)
   where

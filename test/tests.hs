@@ -8,24 +8,8 @@ import           Database.RocksDB
 import           Test.Hspec       (describe, hspec, it, shouldReturn)
 import           UnliftIO
 
-data TestDB = TestDB { testDB :: !DB
-                     , testReadOpts :: !ReadOpts
-                     , testWriteOpts :: !WriteOpts
-                     }
-
-withTestDB :: MonadUnliftIO m
-           => FilePath
-           -> (TestDB -> m a)
-           -> m a
-withTestDB path f =
-    withOptions def {createIfMissing = True} $ \opts ->
-    withDB path opts $ \db ->
-    withReadOpts Nothing $ \read_opts ->
-    withWriteOpts $ \write_opts ->
-    f TestDB { testDB = db
-             , testReadOpts = read_opts
-             , testWriteOpts = write_opts
-             }
+withTestDB :: MonadUnliftIO m => FilePath -> (DB -> m a) -> m a
+withTestDB path = withDB path def{createIfMissing = True}
 
 main :: IO ()
 main =  do
@@ -34,6 +18,5 @@ main =  do
             it "should put items into the database and retrieve them" $
                 withSystemTempDirectory "rocksdb" $ \path ->
                 withTestDB path $ \db -> do
-                    put (testDB db) (testWriteOpts db) "zzz" "zzz"
-                    get (testDB db) (testReadOpts db) "zzz"
-                        `shouldReturn` Just "zzz"
+                    put db "zzz" "zzz"
+                    get db "zzz" `shouldReturn` Just "zzz"
