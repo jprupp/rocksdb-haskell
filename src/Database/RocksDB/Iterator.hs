@@ -45,8 +45,8 @@ import           UnliftIO
 -- however, specify an older 'Snapshot' in the 'ReadOptions'.
 --
 -- Iterator should not be used after computation ends.
-withIter :: MonadUnliftIO m => DB -> ReadOpts -> (Iterator -> m a) -> m a
-withIter DB{rocksDB = rocks_db} read_opts =
+withIter :: MonadUnliftIO m => DB -> (Iterator -> m a) -> m a
+withIter DB{rocksDB = rocks_db, readOpts = read_opts} =
     bracket create_iterator destroy_iterator
   where
     destroy_iterator = liftIO . c_rocksdb_iter_destroy
