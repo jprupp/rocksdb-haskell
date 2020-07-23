@@ -1,4 +1,9 @@
-## Unreleased
+## 2.1.0
+
+ * Add support for column families.
+
+
+## 2.0.0
 
  * Fork into a different project
  * Rewrite most of the code to make it faster and easier to use

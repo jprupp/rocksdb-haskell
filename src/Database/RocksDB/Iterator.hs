@@ -14,6 +14,7 @@
 module Database.RocksDB.Iterator
     ( Iterator
     , withIter
+    , withIterCF
     , iterEntry
     , iterFirst
     , iterGetError
@@ -47,13 +48,24 @@ import           UnliftIO
 --
 -- Iterator should not be used after computation ends.
 withIter :: MonadUnliftIO m => DB -> (Iterator -> m a) -> m a
-withIter DB{rocksDB = rocks_db, readOpts = read_opts} =
+withIter db = withIterCommon db Nothing
+
+withIterCF :: MonadUnliftIO m => DB -> ColumnFamily -> (Iterator -> m a) -> m a
+withIterCF db cf = withIterCommon db (Just cf)
+
+withIterCommon :: MonadUnliftIO m
+               => DB
+               -> Maybe ColumnFamily
+               -> (Iterator -> m a)
+               -> m a
+withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} mcf =
     bracket create_iterator destroy_iterator
   where
     destroy_iterator = liftIO . c_rocksdb_iter_destroy
     create_iterator = liftIO $
-        throwErrnoIfNull "create_iterator" $
-        c_rocksdb_create_iterator rocks_db read_opts
+        throwErrnoIfNull "create_iterator" $ case mcf of
+        Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
+        Nothing -> c_rocksdb_create_iterator rocks_db read_opts
 
 -- | An iterator is either positioned at a key/value pair, or not valid. This
 -- function returns /true/ iff the iterator is valid.

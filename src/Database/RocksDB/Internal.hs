@@ -15,6 +15,7 @@ module Database.RocksDB.Internal
 
     -- * Smart constructors & extractors
     , withOptions
+    , withOptionsCF
     , withReadOpts
     , withWriteOpts
 
@@ -82,6 +83,13 @@ withOptions Config {..} f =
                                (intToCSize n)
                 return $ Just pfx_extract
         return (opts_ptr, maybe_pfx_extract)
+
+withOptionsCF :: MonadUnliftIO m => [Config] -> ([Options] -> m a) -> m a
+withOptionsCF cfgs f =
+    go [] cfgs
+  where
+    go acc [] = f (reverse acc)
+    go acc (c:cs) = withOptions c $ \o -> go (o:acc) cs
 
 withReadOpts :: MonadUnliftIO m => Maybe Snapshot -> (ReadOpts -> m a) -> m a
 withReadOpts maybe_snap_ptr =
