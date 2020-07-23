@@ -48,7 +48,7 @@ module Database.RocksDB.Base
     , module Database.RocksDB.Iterator
     ) where
 
-import           Control.Monad             (when, (>=>), forM, forM_)
+import           Control.Monad             (when, (>=>), forM)
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import           Data.ByteString.Internal  (ByteString (..))
@@ -128,15 +128,20 @@ withDBCF path config cf_cfgs f =
                             write_opts
                 ) destroy_db f
   where
-    create_new cf_names cf_opts = do
+    create_new cf_names cf_opts opts_ptr read_opts write_opts = do
         createDirectoryIfMissing True path
-        empty <- null <$> listDirectory path
-        when empty $ withDB path config $ \db -> do
+        withCString path $ \path_ptr -> do
+            db_ptr <- liftIO . throwIfErr "open" $
+                c_rocksdb_open opts_ptr path_ptr
             cfs <- forM (zip cf_names cf_opts) $ \(n, o) ->
                 throwIfErr "create_column_family" $
                 c_rocksdb_create_column_family
-                (rocksDB db) o n
-            forM_ cfs c_rocksdb_column_family_handle_destroy
+                db_ptr o n
+            return DB { rocksDB = db_ptr
+                      , columnFamilies = cfs
+                      , readOpts = read_opts
+                      , writeOpts = write_opts
+                      }
     destroy_db db = liftIO $ do
         mapM_ c_rocksdb_column_family_handle_destroy (columnFamilies db)
         c_rocksdb_close $ rocksDB db
@@ -149,25 +154,27 @@ withDBCF path config cf_cfgs f =
               cf_ptrs_array
               write_opts = liftIO $ do
         when (createIfMissing config) $
-            create_new cf_names cf_opts
-        withCString path $ \path_ptr ->
-            withCString "default" $ \cf_deflt_name -> do
-                pokeArray cf_names_array (cf_deflt_name : cf_names)
-                pokeArray cf_opts_array (opts_ptr : cf_opts)
-                db_ptr <- throwIfErr "open" $
-                    c_rocksdb_open_column_families
-                    opts_ptr
-                    path_ptr
-                    (intToCInt (length cf_cfgs + 1))
-                    cf_names_array
-                    cf_opts_array
-                    cf_ptrs_array
-                cfs <- peekArray (length cf_cfgs + 1) cf_ptrs_array
-                return DB { rocksDB = db_ptr
-                          , columnFamilies = tail cfs
-                          , readOpts = read_opts
-                          , writeOpts = write_opts
-                          }
+            createDirectoryIfMissing True path
+        null <$> listDirectory path >>= \case
+            True -> create_new cf_names cf_opts opts_ptr read_opts write_opts
+            False -> withCString path $ \path_ptr ->
+                withCString "default" $ \cf_deflt_name -> do
+                    pokeArray cf_names_array (cf_deflt_name : cf_names)
+                    pokeArray cf_opts_array (opts_ptr : cf_opts)
+                    db_ptr <- throwIfErr "open" $
+                        c_rocksdb_open_column_families
+                        opts_ptr
+                        path_ptr
+                        (intToCInt (length cf_cfgs + 1))
+                        cf_names_array
+                        cf_opts_array
+                        cf_ptrs_array
+                    cfs <- peekArray (length cf_cfgs + 1) cf_ptrs_array
+                    return DB { rocksDB = db_ptr
+                              , columnFamilies = tail cfs
+                              , readOpts = read_opts
+                              , writeOpts = write_opts
+                              }
 
 -- | Run an action with a snapshot of the database.
 -- The 'DB' object is not valid after the action ends.
