@@ -17,6 +17,7 @@ module Database.RocksDB.Base
       DB (..)
     , BatchOp (..)
     , Range
+    , ColumnFamily
 
     -- * Options
     , Config (..)
