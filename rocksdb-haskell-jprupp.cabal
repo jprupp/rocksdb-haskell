@@ -4,10 +4,10 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: e60e134f110b492122b3c20c49c57627b92624316c28c814c9e571fb2ff156b3
+-- hash: 094c0ad3842293bfb0c2b11fda87cf96076e2f497046a7e82023bfd4d96d4e0d
 
 name:           rocksdb-haskell-jprupp
-version:        2.1.2
+version:        2.1.3
 synopsis:       Haskell bindings for RocksDB
 description:    See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 category:       Database, FFI

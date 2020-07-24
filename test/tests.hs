@@ -10,13 +10,16 @@ import           Database.RocksDB
 import           Test.Hspec              (describe, hspec, it, shouldReturn)
 import           UnliftIO
 
+conf :: Config
+conf = def{createIfMissing = True, errorIfExists = True}
+
 withTestDB :: MonadUnliftIO m => FilePath -> (DB -> m a) -> m a
 withTestDB path =
-    withDB path def{createIfMissing = True}
+    withDB path conf
 
 withTestDBCF :: MonadUnliftIO m => FilePath -> [String] -> (DB -> m a) -> m a
 withTestDBCF path cfs =
-    withDBCF path def{createIfMissing = True} (map (,def) cfs)
+    withDBCF path conf (map (,conf) cfs)
 
 main :: IO ()
 main =  do

@@ -1,3 +1,13 @@
+## 2.1.3
+
+ * Correct bug where database was ignoring prefix length config.
+
+
+## 2.1.2
+
+ * Correct bug when opening database with column families.
+
+
 ## 2.1.1
 
  * Expose ColumnFamily type.

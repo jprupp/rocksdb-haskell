@@ -62,7 +62,8 @@ withOptions Config {..} f =
   where
     destroy_opts (opts_ptr, maybe_pfx_extract) = liftIO $ do
         c_rocksdb_options_destroy opts_ptr
-        forM_ maybe_pfx_extract c_rocksdb_slicetransform_destroy
+        forM_ maybe_pfx_extract
+            c_rocksdb_slicetransform_destroy
     create_opts = liftIO $ do
         opts_ptr <- c_rocksdb_options_create
         c_rocksdb_options_set_create_if_missing
@@ -74,13 +75,14 @@ withOptions Config {..} f =
         case maxFiles of
             Nothing -> return ()
             Just n  -> c_rocksdb_options_set_max_open_files
-                      opts_ptr
-                      (intToCInt n)
+                       opts_ptr
+                       (intToCInt n)
         maybe_pfx_extract <- case prefixLength of
             Nothing -> return Nothing
             Just n -> do
                 pfx_extract <- c_rocksdb_slicetransform_create_fixed_prefix
                                (intToCSize n)
+                c_rocksdb_options_set_prefix_extractor opts_ptr pfx_extract
                 return $ Just pfx_extract
         return (opts_ptr, maybe_pfx_extract)
 

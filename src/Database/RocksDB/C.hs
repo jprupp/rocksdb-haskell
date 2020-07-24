@@ -20,7 +20,7 @@ module Database.RocksDB.C
     , Snapshot
     , Iterator
     , WriteBatch
-    , BloomFilter
+    , FilterPolicy
     , ErrPtr
     , DBName
     , CFName
@@ -73,10 +73,14 @@ module Database.RocksDB.C
     , c_rocksdb_options_set_paranoid_checks
     , c_rocksdb_options_set_max_open_files
     , c_rocksdb_options_set_prefix_extractor
+    , c_rocksdb_options_set_block_based_table_factory
+    , c_rocksdb_block_based_options_create
+    , c_rocksdb_block_based_options_set_filter_policy
+    , c_rocksdb_block_based_options_destroy
     , c_rocksdb_slicetransform_create_fixed_prefix
     , c_rocksdb_slicetransform_destroy
     , c_rocksdb_filterpolicy_destroy
-    , c_rocksdb_filterpolicy_create_bloom
+    , c_rocksdb_filterpolicy_create_bloom_full
     , c_rocksdb_readoptions_create
     , c_rocksdb_readoptions_destroy
     , c_rocksdb_readoptions_set_snapshot
@@ -93,23 +97,25 @@ data LRocksDB
 data LColumnFamily
 data LIterator
 data LOptions
+data LBlockBasedOptions
 data LReadOpts
 data LSnapshot
 data LWriteBatch
 data LWriteOpts
-data LBloomFilter
+data LFilterPolicy
 data LPrefixExtract
 
-type RocksDB       = Ptr LRocksDB
-type ColumnFamily  = Ptr LColumnFamily
-type Options       = Ptr LOptions
-type WriteBatch    = Ptr LWriteBatch
-type PrefixExtract = Ptr LPrefixExtract
-type ReadOpts      = Ptr LReadOpts
-type WriteOpts     = Ptr LWriteOpts
-type Snapshot      = Ptr LSnapshot
-type Iterator      = Ptr LIterator
-type BloomFilter   = Ptr LBloomFilter
+type RocksDB            = Ptr LRocksDB
+type ColumnFamily       = Ptr LColumnFamily
+type Options            = Ptr LOptions
+type WriteBatch         = Ptr LWriteBatch
+type PrefixExtract      = Ptr LPrefixExtract
+type ReadOpts           = Ptr LReadOpts
+type WriteOpts          = Ptr LWriteOpts
+type Snapshot           = Ptr LSnapshot
+type Iterator           = Ptr LIterator
+type FilterPolicy       = Ptr LFilterPolicy
+type BlockBasedOptions  = Ptr LBlockBasedOptions
 
 type ErrPtr           = Ptr CString
 type DBName           = CString
@@ -371,6 +377,27 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_set_prefix_extractor"
                                          -> IO ()
 
 --
+-- Block-Based Options
+--
+
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_create"
+  c_rocksdb_block_based_options_create :: IO BlockBasedOptions
+
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_destroy"
+  c_rocksdb_block_based_options_destroy :: BlockBasedOptions
+                                        -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_filter_policy"
+  c_rocksdb_block_based_options_set_filter_policy :: BlockBasedOptions
+                                                  -> FilterPolicy
+                                                  -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_block_based_table_factory"
+  c_rocksdb_options_set_block_based_table_factory :: Options
+                                                  -> BlockBasedOptions
+                                                  -> IO ()
+
+--
 -- Prefix Extractor
 --
 
@@ -385,10 +412,10 @@ foreign import ccall safe "rocksdb/c.h rocksdb_slicetransform_destroy"
 --
 
 foreign import ccall safe "rocksdb/c.h rocksdb_filterpolicy_destroy"
-  c_rocksdb_filterpolicy_destroy :: BloomFilter -> IO ()
+  c_rocksdb_filterpolicy_destroy :: FilterPolicy -> IO ()
 
-foreign import ccall safe "rocksdb/c.h rocksdb_filterpolicy_create_bloom"
-  c_rocksdb_filterpolicy_create_bloom :: CInt -> IO BloomFilter
+foreign import ccall safe "rocksdb/c.h rocksdb_filterpolicy_create_bloom_full"
+  c_rocksdb_filterpolicy_create_bloom_full :: CInt -> IO FilterPolicy
 
 --
 -- Read options

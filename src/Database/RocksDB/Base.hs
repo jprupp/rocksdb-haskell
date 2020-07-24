@@ -34,10 +34,6 @@ module Database.RocksDB.Base
     , getCF
     , withSnapshot
 
-    -- * Filter Policy / Bloom Filter
-    , BloomFilter
-    , withBloomFilter
-
     -- * Administrative Functions
     , Property (..), getProperty
     , destroy
@@ -69,15 +65,6 @@ data BatchOp = Put !ByteString !ByteString
              | PutCF !ColumnFamily !ByteString !ByteString
              | DelCF !ColumnFamily !ByteString
              deriving (Eq, Show)
-
--- | Create a 'BloomFilter'
-withBloomFilter :: MonadUnliftIO m => Int -> (BloomFilter -> m a) -> m a
-withBloomFilter i =
-    bracket create_bloom_filter destroy_bloom_filter
-  where
-    destroy_bloom_filter = liftIO . c_rocksdb_filterpolicy_destroy
-    create_bloom_filter = liftIO $
-        c_rocksdb_filterpolicy_create_bloom (intToCInt i)
 
 -- | Open a database.
 --
