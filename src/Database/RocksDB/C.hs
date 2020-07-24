@@ -16,7 +16,7 @@ module Database.RocksDB.C
     , ReadOpts
     , WriteOpts
     , ColumnFamily
-    , PrefixExtract
+    , SliceTransform
     , Snapshot
     , Iterator
     , WriteBatch
@@ -103,13 +103,13 @@ data LSnapshot
 data LWriteBatch
 data LWriteOpts
 data LFilterPolicy
-data LPrefixExtract
+data LSliceTransform
 
 type RocksDB            = Ptr LRocksDB
 type ColumnFamily       = Ptr LColumnFamily
 type Options            = Ptr LOptions
 type WriteBatch         = Ptr LWriteBatch
-type PrefixExtract      = Ptr LPrefixExtract
+type SliceTransform      = Ptr LSliceTransform
 type ReadOpts           = Ptr LReadOpts
 type WriteOpts          = Ptr LWriteOpts
 type Snapshot           = Ptr LSnapshot
@@ -373,7 +373,7 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_set_max_open_files"
 
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_prefix_extractor"
   c_rocksdb_options_set_prefix_extractor :: Options
-                                         -> PrefixExtract
+                                         -> SliceTransform
                                          -> IO ()
 
 --
@@ -402,10 +402,10 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_set_block_based_table_fac
 --
 
 foreign import ccall safe "rocksdb/c.h rocksdb_slicetransform_create_fixed_prefix"
-  c_rocksdb_slicetransform_create_fixed_prefix :: CSize -> IO PrefixExtract
+  c_rocksdb_slicetransform_create_fixed_prefix :: CSize -> IO SliceTransform
 
 foreign import ccall safe "rocksdb/c.h rocksdb_slicetransform_destroy"
-  c_rocksdb_slicetransform_destroy :: PrefixExtract -> IO ()
+  c_rocksdb_slicetransform_destroy :: SliceTransform -> IO ()
 
 --
 -- Bloom Filter

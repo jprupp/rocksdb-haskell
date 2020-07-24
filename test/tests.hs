@@ -11,7 +11,11 @@ import           Test.Hspec              (describe, hspec, it, shouldReturn)
 import           UnliftIO
 
 conf :: Config
-conf = def{createIfMissing = True, errorIfExists = True}
+conf = def { createIfMissing = True
+           , errorIfExists   = True
+           , bloomFilter     = True
+           , prefixLength    = Just 3
+           }
 
 withTestDB :: MonadUnliftIO m => FilePath -> (DB -> m a) -> m a
 withTestDB path =

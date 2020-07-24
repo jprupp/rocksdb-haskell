@@ -46,6 +46,7 @@ data Config = Config { createIfMissing :: !Bool
                      , paranoidChecks  :: !Bool
                      , maxFiles        :: !(Maybe Int)
                      , prefixLength    :: !(Maybe Int)
+                     , bloomFilter     :: !Bool
                      } deriving (Eq, Show)
 
 instance Default Config where
@@ -54,37 +55,50 @@ instance Default Config where
                  , paranoidChecks   = False
                  , maxFiles         = Nothing
                  , prefixLength     = Nothing
+                 , bloomFilter      = False
                  }
 
 withOptions :: MonadUnliftIO m => Config -> (Options -> m a) -> m a
 withOptions Config {..} f =
-    bracket create_opts destroy_opts (f . fst)
+    with_opts $ \opts -> do
+        liftIO $ do
+            slice <- bloom
+            block_opts opts slice
+            pfx_extract opts
+            max_files opts
+            c_rocksdb_options_set_create_if_missing
+                opts (boolToCBool createIfMissing)
+            c_rocksdb_options_set_error_if_exists
+                opts (boolToCBool errorIfExists)
+            c_rocksdb_options_set_paranoid_checks
+                opts (boolToCBool paranoidChecks)
+        f opts
   where
-    destroy_opts (opts_ptr, maybe_pfx_extract) = liftIO $ do
-        c_rocksdb_options_destroy opts_ptr
-        forM_ maybe_pfx_extract
-            c_rocksdb_slicetransform_destroy
-    create_opts = liftIO $ do
-        opts_ptr <- c_rocksdb_options_create
-        c_rocksdb_options_set_create_if_missing
-            opts_ptr (boolToCBool createIfMissing)
-        c_rocksdb_options_set_error_if_exists
-            opts_ptr (boolToCBool errorIfExists)
-        c_rocksdb_options_set_paranoid_checks
-            opts_ptr (boolToCBool paranoidChecks)
+    with_opts =
+        bracket
+        (liftIO c_rocksdb_options_create)
+        (liftIO . c_rocksdb_options_destroy)
+    block_opts _ Nothing = return ()
+    block_opts opts (Just slice) = liftIO $ do
+        block <- c_rocksdb_block_based_options_create
+        c_rocksdb_block_based_options_set_filter_policy block slice
+        c_rocksdb_options_set_block_based_table_factory opts block
+    bloom =
+        if bloomFilter
+        then Just <$> c_rocksdb_filterpolicy_create_bloom_full 10
+        else return Nothing
+    pfx_extract opts =
+        case prefixLength of
+            Nothing -> return ()
+            Just len -> liftIO $ do
+                p <- c_rocksdb_slicetransform_create_fixed_prefix
+                     (intToCSize len)
+                c_rocksdb_options_set_prefix_extractor opts p
+    max_files opts =
         case maxFiles of
             Nothing -> return ()
-            Just n  -> c_rocksdb_options_set_max_open_files
-                       opts_ptr
-                       (intToCInt n)
-        maybe_pfx_extract <- case prefixLength of
-            Nothing -> return Nothing
-            Just n -> do
-                pfx_extract <- c_rocksdb_slicetransform_create_fixed_prefix
-                               (intToCSize n)
-                c_rocksdb_options_set_prefix_extractor opts_ptr pfx_extract
-                return $ Just pfx_extract
-        return (opts_ptr, maybe_pfx_extract)
+            Just i -> c_rocksdb_options_set_max_open_files opts (intToCInt i)
+
 
 withOptionsCF :: MonadUnliftIO m => [Config] -> ([Options] -> m a) -> m a
 withOptionsCF cfgs f =
