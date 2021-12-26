@@ -3,6 +3,7 @@ tags
 *.swp
 *.a
 dist
+dist-newstyle/
 cabal-dev
 *.o
 *.hi
