@@ -33,6 +33,9 @@ module Database.RocksDB.Base
     , get
     , getCF
     , withSnapshot
+    , snapshot
+    , createSnapshot
+    , releaseSnapshot
 
     -- * Administrative Functions
     , Property (..), getProperty
@@ -44,7 +47,7 @@ module Database.RocksDB.Base
     , module Database.RocksDB.Iterator
     ) where
 
-import           Control.Monad             (when, (>=>), forM)
+import           Control.Monad             (forM, when, (>=>))
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import           Data.ByteString.Internal  (ByteString (..))
@@ -55,6 +58,7 @@ import           Database.RocksDB.Iterator
 import           UnliftIO
 import           UnliftIO.Directory
 import           UnliftIO.Foreign
+import           UnliftIO.Resource
 
 -- | Properties exposed by RocksDB
 data Property = NumFilesAtLevel Int | Stats | SSTables
@@ -166,14 +170,25 @@ withDBCF path config cf_cfgs f =
 -- | Run an action with a snapshot of the database.
 -- The 'DB' object is not valid after the action ends.
 withSnapshot :: MonadUnliftIO m => DB -> (DB -> m a) -> m a
-withSnapshot db@DB{rocksDB = db_ptr} f =
-    bracket create_snapshot release_snapshot (f . fst)
-  where
-    release_snapshot = liftIO . c_rocksdb_release_snapshot db_ptr . snd
-    create_snapshot = liftIO $ do
-        snap_ptr <- c_rocksdb_create_snapshot db_ptr
-        withReadOpts (Just snap_ptr) $ \read_opts ->
-            return (db{readOpts = read_opts}, snap_ptr)
+withSnapshot db f =
+    bracket (createSnapshot db) releaseSnapshot (f . fst)
+
+-- | The 'DB' snapshot is not valid outside of 'MonadResource'.
+snapshot :: (MonadIO m, MonadResource m) => DB -> m DB
+snapshot db =
+    fst . snd <$> allocate (createSnapshot db) releaseSnapshot
+
+-- | Manually create an unmanaged snapshot.
+createSnapshot :: MonadIO m => DB -> m (DB, Snapshot)
+createSnapshot db@DB{rocksDB = db_ptr} = liftIO $ do
+    snap_ptr <- c_rocksdb_create_snapshot db_ptr
+    withReadOpts (Just snap_ptr) $ \read_opts ->
+        return (db{readOpts = read_opts}, snap_ptr)
+
+-- | Function to release an unmanaged snapshot.
+releaseSnapshot :: MonadIO m => (DB, Snapshot) -> m ()
+releaseSnapshot (DB{rocksDB = db_ptr}, snap_ptr) =
+    liftIO $ c_rocksdb_release_snapshot db_ptr snap_ptr
 
 -- | Get a DB property.
 getProperty :: MonadIO m => DB -> Property -> m (Maybe ByteString)
@@ -340,5 +355,5 @@ withStrings :: MonadUnliftIO m => [String] -> ([CString] -> m a) -> m a
 withStrings ss f =
     go [] ss
   where
-    go acc [] = f (reverse acc)
+    go acc []     = f (reverse acc)
     go acc (x:xs) = withCString x $ \p -> go (p:acc) xs

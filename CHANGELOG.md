@@ -1,3 +1,7 @@
+## 2.1.4
+
+ * Add ResourceT support for snapshots and iterators.
+
 ## 2.1.3
 
  * Correct bug where database was ignoring prefix length config.

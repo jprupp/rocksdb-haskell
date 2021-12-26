@@ -15,6 +15,11 @@ module Database.RocksDB.Iterator
     ( Iterator
     , withIter
     , withIterCF
+    , iter
+    , iterCF
+    , iterator
+    , createIterator
+    , destroyIterator
     , iterEntry
     , iterFirst
     , iterGetError
@@ -39,6 +44,7 @@ import           Foreign.C.Error           (throwErrnoIfNull)
 import           Foreign.C.String          (CString, peekCString)
 import           Foreign.C.Types           (CSize)
 import           UnliftIO
+import           UnliftIO.Resource
 
 -- | Create 'Iterator' and use it.
 --
@@ -53,6 +59,13 @@ withIter db = withIterCommon db Nothing
 withIterCF :: MonadUnliftIO m => DB -> ColumnFamily -> (Iterator -> m a) -> m a
 withIterCF db cf = withIterCommon db (Just cf)
 
+-- | Variation on 'iterator' below.
+iter :: (MonadIO m, MonadResource m) => DB -> m Iterator
+iter db = iterator db Nothing
+
+iterCF :: (MonadIO m, MonadResource m) => DB -> ColumnFamily -> m Iterator
+iterCF db cf = iterator db (Just cf)
+
 withIterCommon :: MonadUnliftIO m
                => DB
                -> Maybe ColumnFamily
@@ -66,6 +79,23 @@ withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} mcf =
         throwErrnoIfNull "create_iterator" $ case mcf of
         Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
         Nothing -> c_rocksdb_create_iterator rocks_db read_opts
+
+-- | Iterator is not valid outside of 'ResourceT' context.
+iterator :: (MonadIO m, MonadResource m)
+         => DB -> Maybe ColumnFamily -> m Iterator
+iterator db mcf =
+    snd <$> allocate (createIterator db mcf) destroyIterator
+
+-- | Manually create unmanaged iterator.
+createIterator :: MonadIO m => DB -> Maybe ColumnFamily -> m Iterator
+createIterator DB{rocksDB = rocks_db, readOpts = read_opts} mcf = liftIO $
+    throwErrnoIfNull "create_iterator" $ case mcf of
+        Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
+        Nothing -> c_rocksdb_create_iterator rocks_db read_opts
+
+-- | Destroy unmanaged iterator.
+destroyIterator :: MonadIO m => Iterator -> m ()
+destroyIterator = liftIO . c_rocksdb_iter_destroy
 
 -- | An iterator is either positioned at a key/value pair, or not valid. This
 -- function returns /true/ iff the iterator is valid.
@@ -127,9 +157,9 @@ iterValue = liftIO . flip iterString c_rocksdb_iter_value
 -- | Return the current entry as a pair, if the iterator is currently positioned
 -- at an entry, ie. 'iterValid'.
 iterEntry :: MonadIO m => Iterator -> m (Maybe (ByteString, ByteString))
-iterEntry iter = liftIO $ do
-    mkey <- iterKey iter
-    mval <- iterValue iter
+iterEntry it = liftIO $ do
+    mkey <- iterKey it
+    mval <- iterValue it
     return $ (,) <$> mkey <*> mval
 
 -- | Check for errors

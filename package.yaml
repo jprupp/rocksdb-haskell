@@ -1,5 +1,5 @@
 name: rocksdb-haskell-jprupp
-version: 2.1.3
+version: 2.1.4
 synopsis: Haskell bindings for RocksDB
 description: See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 maintainer: Jean-Pierre Rupp <jprupp@protonmail.ch>
@@ -19,6 +19,7 @@ dependencies:
   - bytestring
   - data-default
   - directory
+  - resourcet
   - unliftio
 
 library:
