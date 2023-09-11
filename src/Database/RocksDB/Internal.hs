@@ -59,45 +59,30 @@ instance Default Config where
                  }
 
 withOptions :: MonadUnliftIO m => Config -> (Options -> m a) -> m a
-withOptions Config {..} f =
-    with_opts $ \opts -> do
-        liftIO $ do
-            slice <- bloom
-            block_opts opts slice
-            pfx_extract opts
-            max_files opts
-            c_rocksdb_options_set_create_if_missing
-                opts (boolToCBool createIfMissing)
-            c_rocksdb_options_set_error_if_exists
-                opts (boolToCBool errorIfExists)
-            c_rocksdb_options_set_paranoid_checks
-                opts (boolToCBool paranoidChecks)
-        f opts
+withOptions Config {..} f = with_opts $ \opts -> do
+    liftIO $ do
+        when bloomFilter $ do
+            fp <- c_rocksdb_filterpolicy_create_bloom_full 10
+            bo <- c_rocksdb_block_based_options_create
+            c_rocksdb_block_based_options_set_filter_policy bo fp
+            c_rocksdb_options_set_block_based_table_factory opts bo
+        forM_ prefixLength $ \l -> do
+            t <- c_rocksdb_slicetransform_create_fixed_prefix (intToCSize l)
+            c_rocksdb_options_set_prefix_extractor opts t
+        forM_ maxFiles $
+            c_rocksdb_options_set_max_open_files opts . intToCInt
+        c_rocksdb_options_set_create_if_missing
+            opts (boolToCBool createIfMissing)
+        c_rocksdb_options_set_error_if_exists
+            opts (boolToCBool errorIfExists)
+        c_rocksdb_options_set_paranoid_checks
+            opts (boolToCBool paranoidChecks)
+    f opts
   where
     with_opts =
         bracket
         (liftIO c_rocksdb_options_create)
         (liftIO . c_rocksdb_options_destroy)
-    block_opts _ Nothing = return ()
-    block_opts opts (Just slice) = liftIO $ do
-        block <- c_rocksdb_block_based_options_create
-        c_rocksdb_block_based_options_set_filter_policy block slice
-        c_rocksdb_options_set_block_based_table_factory opts block
-    bloom =
-        if bloomFilter
-        then Just <$> c_rocksdb_filterpolicy_create_bloom_full 10
-        else return Nothing
-    pfx_extract opts =
-        case prefixLength of
-            Nothing -> return ()
-            Just len -> liftIO $ do
-                p <- c_rocksdb_slicetransform_create_fixed_prefix
-                     (intToCSize len)
-                c_rocksdb_options_set_prefix_extractor opts p
-    max_files opts =
-        case maxFiles of
-            Nothing -> return ()
-            Just i -> c_rocksdb_options_set_max_open_files opts (intToCInt i)
 
 
 withOptionsCF :: MonadUnliftIO m => [Config] -> ([Options] -> m a) -> m a
@@ -131,9 +116,10 @@ throwIfErr :: MonadUnliftIO m => String -> (ErrPtr -> m a) -> m a
 throwIfErr s f = alloca $ \err_ptr -> do
     liftIO $ poke err_ptr nullPtr
     res  <- f err_ptr
-    erra <- liftIO $ peek err_ptr
-    when (erra /= nullPtr) $ do
-        err <- liftIO $ peekCString erra
+    err_cstr <- liftIO $ peek err_ptr
+    when (err_cstr /= nullPtr) $ do
+        err <- liftIO $ peekCString err_cstr
+        liftIO $ free err_cstr
         throwIO $ userError $ s ++ ": " ++ err
     return res
 

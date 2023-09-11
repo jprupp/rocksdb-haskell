@@ -1,3 +1,7 @@
+## 2.1.5
+
+ * Fix errors not releasing memory.
+
 ## 2.1.4
 
  * Add ResourceT support for snapshots and iterators.

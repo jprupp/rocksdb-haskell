@@ -37,7 +37,7 @@ main =  do
             it "should store and retrieve items from different column families" $
                 withSystemTempDirectory "rocksdbcf1" $ \path ->
                 withTestDBCF path ["two"] $ \db -> do
-                    let [two] = columnFamilies db
+                    let two = head $ columnFamilies db
                     put db "one" "one"
                     get db "one" `shouldReturn` Just "one"
                     getCF db two "one" `shouldReturn` Nothing
@@ -57,5 +57,5 @@ main =  do
                         kvs = zip keys vals
                     as1 <- mapM (\(k, v) -> async $ put db k v) kvs
                     mapM_ wait as1
-                    as2 <- mapM (\k -> async $ get db k) keys
+                    as2 <- mapM (async . get db) keys
                     mapM wait as2 `shouldReturn` map Just vals
