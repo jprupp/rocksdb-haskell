@@ -1,3 +1,8 @@
+## 2.1.6
+
+ * Refactor memory use further.
+ * Improve tests.
+
 ## 2.1.5
 
  * Fix errors not releasing memory.

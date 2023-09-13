@@ -4,10 +4,10 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 7e9a6be0b5ec766b502a4a03665778ca9fd0e9b17df4f5da3f902cb7631111be
+-- hash: 980f107d02562d992868728e11392b8fdba57955009c1531d95928a54247f8de
 
 name:           rocksdb-haskell-jprupp
-version:        2.1.5
+version:        2.1.6
 synopsis:       Haskell bindings for RocksDB
 description:    See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 category:       Database, FFI
@@ -51,7 +51,7 @@ library
 
 test-suite spec
   type: exitcode-stdio-1.0
-  main-is: tests.hs
+  main-is: Spec.hs
   other-modules:
       Paths_rocksdb_haskell_jprupp
   hs-source-dirs:
@@ -66,6 +66,5 @@ test-suite spec
     , hspec
     , resourcet
     , rocksdb-haskell-jprupp
-    , string-conversions
     , unliftio
   default-language: Haskell2010

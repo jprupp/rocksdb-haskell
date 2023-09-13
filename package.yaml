@@ -1,5 +1,5 @@
 name: rocksdb-haskell-jprupp
-version: 2.1.5
+version: 2.1.6
 synopsis: Haskell bindings for RocksDB
 description: See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 maintainer: Jean-Pierre Rupp <jprupp@protonmail.ch>
@@ -30,7 +30,7 @@ library:
 
 tests:
   spec:
-    main: tests.hs
+    main: Spec.hs
     source-dirs: test
     ghc-options:
       - -threaded
@@ -38,6 +38,5 @@ tests:
       - -with-rtsopts=-N
     dependencies:
       - rocksdb-haskell-jprupp
-      - string-conversions
       - hspec
       - QuickCheck

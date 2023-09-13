@@ -284,9 +284,8 @@ getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key = liftIO $
             then return Nothing
             else do
                 vlen <- peek vlen_ptr
-                res <- Just <$> BS.packCStringLen (val_ptr, cSizeToInt vlen)
-                freeCString val_ptr
-                return res
+                res <- BU.unsafePackMallocCStringLen (val_ptr, cSizeToInt vlen)
+                return $ Just res
 
 delete :: MonadIO m => DB -> ByteString -> m ()
 delete db = deleteCommon db Nothing
