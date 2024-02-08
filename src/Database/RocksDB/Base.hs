@@ -72,7 +72,8 @@ data BatchOp = Put !ByteString !ByteString
 
 -- | Open a database.
 --
--- The returned handle should be released with 'close'.
+-- The returned handle will be automatically released with 'close'
+-- when the function exits.
 withDB :: MonadUnliftIO m => FilePath -> Config -> (DB -> m a) -> m a
 withDB path config f =
     withOptions config $ \opts_ptr ->
