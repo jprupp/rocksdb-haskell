@@ -1,3 +1,7 @@
+## 2.1.7
+
+ * Simplify author name.
+
 ## 2.1.6
 
  * Refactor memory use further.

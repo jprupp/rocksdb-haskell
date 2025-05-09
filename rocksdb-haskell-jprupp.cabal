@@ -1,19 +1,19 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.35.2.
+-- This file has been generated from package.yaml by hpack version 0.38.0.
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 980f107d02562d992868728e11392b8fdba57955009c1531d95928a54247f8de
+-- hash: bd91a467d6bd847de202b5a719feec0870396e6f5dcdb305c82ef81b2dbe33be
 
 name:           rocksdb-haskell-jprupp
-version:        2.1.6
+version:        2.1.7
 synopsis:       Haskell bindings for RocksDB
 description:    See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 category:       Database, FFI
 homepage:       https://github.com/jprupp/rocksdb-haskell#readme
 bug-reports:    https://github.com/jprupp/rocksdb-haskell/issues
-maintainer:     Jean-Pierre Rupp <jprupp@protonmail.ch>
+maintainer:     JP Rupp <jprupp@protonmail.ch>
 license:        BSD3
 license-file:   LICENSE
 build-type:     Simple
