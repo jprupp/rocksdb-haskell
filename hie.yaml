@@ -1,6 +1,0 @@
-cradle:
-  stack:
-    - path: "./src"
-      component: rocksdb-haskell-jprupp:lib
-    - path: "./test"
-      component: rocksdb-haskell-jprupp:test:spec
