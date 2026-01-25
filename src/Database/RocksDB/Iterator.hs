@@ -1,4 +1,5 @@
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE TupleSections #-}
 
 -- |
 -- Module      : Database.RocksDB.Iterator
@@ -12,13 +13,22 @@
 -- Iterating over key ranges.
 module Database.RocksDB.Iterator
   ( Iterator,
+    -- * Bracket-style iteration
     withIter,
     withIterCF,
+    withIterSnap,
+    withIterSnapCF,
+    -- * ResourceT-style iteration
     iter,
     iterCF,
     iterator,
+    iteratorSnap,
+    -- * Manual iterator management
     createIterator,
+    createIteratorSnap,
     destroyIterator,
+    destroyReadOpts,
+    -- * Iterator operations
     iterEntry,
     iterFirst,
     iterGetError,
@@ -52,10 +62,38 @@ import UnliftIO.Resource
 --
 -- Iterator should not be used after computation ends.
 withIter :: (MonadUnliftIO m) => DB -> (Iterator -> m a) -> m a
-withIter db = withIterCommon db Nothing
+withIter db = withIterCommon db Nothing Nothing
 
 withIterCF :: (MonadUnliftIO m) => DB -> ColumnFamily -> (Iterator -> m a) -> m a
-withIterCF db cf = withIterCommon db (Just cf)
+withIterCF db cf = withIterCommon db Nothing (Just cf)
+
+-- | Create 'Iterator' on a specific snapshot.
+--
+-- If 'Nothing' is passed, the iterator creates its own implicit snapshot.
+-- If 'Just snapshot' is passed, the iterator uses the provided snapshot,
+-- enabling consistent reads across multiple iterators and point queries.
+--
+-- Iterator should not be used after computation ends.
+withIterSnap
+    :: (MonadUnliftIO m)
+    => DB
+    -> Maybe Snapshot
+    -> (Iterator -> m a)
+    -> m a
+withIterSnap db msnap = withIterCommon db msnap Nothing
+
+-- | Create 'Iterator' on a column family with a specific snapshot.
+--
+-- If 'Nothing' is passed for snapshot, the iterator creates its own implicit snapshot.
+-- If 'Just snapshot' is passed, the iterator uses the provided snapshot.
+withIterSnapCF
+    :: (MonadUnliftIO m)
+    => DB
+    -> Maybe Snapshot
+    -> ColumnFamily
+    -> (Iterator -> m a)
+    -> m a
+withIterSnapCF db msnap cf = withIterCommon db msnap (Just cf)
 
 -- | Variation on 'iterator' below.
 iter :: (MonadIO m, MonadResource m) => DB -> m Iterator
@@ -64,36 +102,111 @@ iter db = iterator db Nothing
 iterCF :: (MonadIO m, MonadResource m) => DB -> ColumnFamily -> m Iterator
 iterCF db cf = iterator db (Just cf)
 
-withIterCommon ::
-  (MonadUnliftIO m) =>
-  DB ->
-  Maybe ColumnFamily ->
-  (Iterator -> m a) ->
-  m a
-withIterCommon DB {rocksDB = rocks_db, readOpts = read_opts} mcf =
-  bracket create_iterator destroy_iterator
+withIterCommon
+    :: (MonadUnliftIO m)
+    => DB
+    -> Maybe Snapshot
+    -> Maybe ColumnFamily
+    -> (Iterator -> m a)
+    -> m a
+withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
+    case msnap of
+        Nothing ->
+            -- Use DB's readOpts (iterator creates implicit snapshot)
+            bracket (create_iterator read_opts) destroy_iterator f
+        Just snap ->
+            -- Create temporary ReadOpts with the provided snapshot
+            bracket create_read_opts destroy_read_opts $ \ro ->
+                bracket (create_iterator ro) destroy_iterator f
+          where
+            create_read_opts = liftIO $ do
+                ro <- c_rocksdb_readoptions_create
+                c_rocksdb_readoptions_set_snapshot ro snap
+                return ro
+            destroy_read_opts = liftIO . c_rocksdb_readoptions_destroy
   where
     destroy_iterator = liftIO . c_rocksdb_iter_destroy
-    create_iterator = liftIO $
-      throwErrnoIfNull "create_iterator" $ case mcf of
-        Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
-        Nothing -> c_rocksdb_create_iterator rocks_db read_opts
+    create_iterator ro = liftIO $
+        throwErrnoIfNull "create_iterator" $ case mcf of
+            Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
+            Nothing -> c_rocksdb_create_iterator rocks_db ro
 
 -- | Iterator is not valid outside of 'ResourceT' context.
-iterator ::
-  (MonadIO m, MonadResource m) =>
-  DB ->
-  Maybe ColumnFamily ->
-  m Iterator
+iterator
+    :: (MonadIO m, MonadResource m)
+    => DB
+    -> Maybe ColumnFamily
+    -> m Iterator
 iterator db mcf =
-  snd <$> allocate (createIterator db mcf) destroyIterator
+    snd <$> allocate (createIterator db mcf) destroyIterator
+
+-- | Create iterator on a specific snapshot within 'ResourceT'.
+--
+-- If 'Nothing' is passed, the iterator creates its own implicit snapshot.
+-- If 'Just snapshot' is passed, the iterator uses the provided snapshot.
+iteratorSnap
+    :: (MonadIO m, MonadResource m)
+    => DB
+    -> Maybe Snapshot
+    -> Maybe ColumnFamily
+    -> m Iterator
+iteratorSnap db msnap mcf = case msnap of
+    Nothing -> iterator db mcf
+    Just snap -> do
+        -- Allocate ReadOpts as a resource
+        (_, ro) <- allocate
+            (liftIO $ do
+                ro <- c_rocksdb_readoptions_create
+                c_rocksdb_readoptions_set_snapshot ro snap
+                return ro)
+            (liftIO . c_rocksdb_readoptions_destroy)
+        -- Allocate iterator using the snapshot-aware ReadOpts
+        snd <$> allocate
+            (createIteratorWithOpts db ro mcf)
+            destroyIterator
 
 -- | Manually create unmanaged iterator.
 createIterator :: (MonadIO m) => DB -> Maybe ColumnFamily -> m Iterator
-createIterator DB {rocksDB = rocks_db, readOpts = read_opts} mcf = liftIO $
-  throwErrnoIfNull "create_iterator" $ case mcf of
-    Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
-    Nothing -> c_rocksdb_create_iterator rocks_db read_opts
+createIterator DB{rocksDB = rocks_db, readOpts = read_opts} mcf = liftIO $
+    throwErrnoIfNull "create_iterator" $ case mcf of
+        Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
+        Nothing -> c_rocksdb_create_iterator rocks_db read_opts
+
+-- | Manually create unmanaged iterator on a specific snapshot.
+--
+-- If 'Nothing' is passed, behaves like 'createIterator'.
+-- If 'Just snapshot' is passed, creates a 'ReadOpts' tied to that snapshot.
+--
+-- Returns both the 'Iterator' and the 'ReadOpts' that was created.
+-- Both must be destroyed: use 'destroyIterator' for the iterator,
+-- and 'destroyReadOpts' for the read options.
+--
+-- For automatic resource management, prefer 'withIterSnap' or 'iteratorSnap'.
+createIteratorSnap
+    :: (MonadIO m)
+    => DB
+    -> Maybe Snapshot
+    -> Maybe ColumnFamily
+    -> m (Iterator, Maybe ReadOpts)
+createIteratorSnap db msnap mcf = case msnap of
+    Nothing -> (, Nothing) <$> createIterator db mcf
+    Just snap -> liftIO $ do
+        ro <- c_rocksdb_readoptions_create
+        c_rocksdb_readoptions_set_snapshot ro snap
+        it <- createIteratorWithOpts db ro mcf
+        return (it, Just ro)
+
+-- | Internal: create iterator with explicit ReadOpts.
+createIteratorWithOpts
+    :: (MonadIO m)
+    => DB
+    -> ReadOpts
+    -> Maybe ColumnFamily
+    -> m Iterator
+createIteratorWithOpts DB{rocksDB = rocks_db} ro mcf = liftIO $
+    throwErrnoIfNull "create_iterator" $ case mcf of
+        Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
+        Nothing -> c_rocksdb_create_iterator rocks_db ro
 
 -- | Destroy unmanaged iterator.
 destroyIterator :: (MonadIO m) => Iterator -> m ()
