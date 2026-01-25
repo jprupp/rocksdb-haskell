@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Monad
 import Data.ByteString.Char8 qualified as C
 import Data.Default (def)
@@ -106,3 +107,122 @@ main = do
           iterNext itr -- But it remembers previous position
           iterKey itr `shouldReturn` Just "b"
           iterValue itr `shouldReturn` Just "bbb"
+    describe "Snapshots" $ do
+      it "getCF and iterator see same data during concurrent writes" $ \db -> do
+        let cf = head $ columnFamilies db
+        -- Initial data
+        putCF db cf "key1" "val1"
+        putCF db cf "key2" "val2"
+        putCF db cf "key3" "val3"
+
+        -- Create snapshot
+        (snapDB, snap) <- createSnapshot db
+
+        -- Start writer thread modifying the same keys
+        started <- newEmptyMVar
+        writerThread <- forkIO $ do
+          putMVar started ()
+          let loop n
+                | n > 100 = pure ()
+                | otherwise = do
+                    let suffix = C.pack $ "-v" <> show n
+                    putCF db cf "key1" ("val1" <> suffix)
+                    putCF db cf "key2" ("val2" <> suffix)
+                    putCF db cf "key3" ("val3" <> suffix)
+                    threadDelay 500
+                    loop (n + 1 :: Int)
+          loop (0 :: Int)
+
+        takeMVar started
+        threadDelay 1000 -- Let writer get going
+
+        -- Read via getCF on snapshot
+        v1 <- getCF snapDB cf "key1"
+        threadDelay 10000
+        v2 <- getCF snapDB cf "key2"
+        threadDelay 10000
+        v3 <- getCF snapDB cf "key3"
+
+        -- Read via iterator on same snapshot (using the same column family)
+        iterEntries <- withIterCF snapDB cf $ \itr -> do
+          iterFirst itr
+          let collect acc = do
+                valid <- iterValid itr
+                if valid
+                  then do
+                    mentry <- iterEntry itr
+                    iterNext itr
+                    collect (mentry : acc)
+                  else pure (reverse acc)
+          catMaybes <$> collect []
+
+        -- Clean up
+        killThread writerThread
+        releaseSnapshot (snapDB, snap)
+
+        -- Verify: getCF and iterator see the same original values
+        v1 `shouldBe` Just "val1"
+        v2 `shouldBe` Just "val2"
+        v3 `shouldBe` Just "val3"
+        iterEntries `shouldBe` [("key1", "val1"), ("key2", "val2"), ("key3", "val3")]
+
+      it "withIterSnap sees snapshot data" $ \db -> do
+        put db "a" "1"
+        put db "b" "2"
+        (_, snap) <- createSnapshot db
+        -- Modify after snapshot
+        put db "a" "modified"
+        put db "c" "3"
+        -- Iterator with explicit snapshot should see original data
+        entries <- withIterSnap db (Just snap) $ \itr -> do
+          iterFirst itr
+          let collect acc = do
+                valid <- iterValid itr
+                if valid
+                  then do
+                    mentry <- iterEntry itr
+                    iterNext itr
+                    collect (mentry : acc)
+                  else pure (reverse acc)
+          catMaybes <$> collect []
+        entries `shouldBe` [("a", "1"), ("b", "2")]
+
+      it "withIterSnapCF sees snapshot data on column family" $ \db -> do
+        let cf = head $ columnFamilies db
+        putCF db cf "x" "100"
+        putCF db cf "y" "200"
+        (_, snap) <- createSnapshot db
+        -- Modify after snapshot
+        putCF db cf "x" "modified"
+        putCF db cf "z" "300"
+        -- Iterator with explicit snapshot on CF
+        entries <- withIterSnapCF db (Just snap) cf $ \itr -> do
+          iterFirst itr
+          let collect acc = do
+                valid <- iterValid itr
+                if valid
+                  then do
+                    mentry <- iterEntry itr
+                    iterNext itr
+                    collect (mentry : acc)
+                  else pure (reverse acc)
+          catMaybes <$> collect []
+        entries `shouldBe` [("x", "100"), ("y", "200")]
+
+      it "createIteratorSnap with manual management" $ \db -> do
+        put db "m" "10"
+        put db "n" "20"
+        (_, snap) <- createSnapshot db
+        put db "m" "changed"
+        -- Manual iterator creation with snapshot
+        (itr, mReadOpts) <- createIteratorSnap db (Just snap) Nothing
+        iterFirst itr
+        k1 <- iterKey itr
+        v1 <- iterValue itr
+        iterNext itr
+        k2 <- iterKey itr
+        v2 <- iterValue itr
+        destroyIterator itr
+        forM_ mReadOpts destroyReadOpts
+        (k1, v1) `shouldBe` (Just "m", Just "10")
+        (k2, v2) `shouldBe` (Just "n", Just "20")
