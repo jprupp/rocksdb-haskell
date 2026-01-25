@@ -3,6 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 
+import Control.Concurrent (forkIO, killThread, threadDelay)
 import Control.Monad
 import Data.ByteString.Char8 qualified as C
 import Data.Default (def)
@@ -106,3 +107,61 @@ main = do
           iterNext itr -- But it remembers previous position
           iterKey itr `shouldReturn` Just "b"
           iterValue itr `shouldReturn` Just "bbb"
+    describe "Snapshots" $ do
+      it "getCF and iterator see same data during concurrent writes" $ \db -> do
+        let cf = head $ columnFamilies db
+        -- Initial data
+        putCF db cf "key1" "val1"
+        putCF db cf "key2" "val2"
+        putCF db cf "key3" "val3"
+
+        -- Create snapshot
+        (snapDB, snap) <- createSnapshot db
+
+        -- Start writer thread modifying the same keys
+        started <- newEmptyMVar
+        writerThread <- forkIO $ do
+          putMVar started ()
+          let loop n
+                | n > 100 = pure ()
+                | otherwise = do
+                    let suffix = C.pack $ "-v" <> show n
+                    putCF db cf "key1" ("val1" <> suffix)
+                    putCF db cf "key2" ("val2" <> suffix)
+                    putCF db cf "key3" ("val3" <> suffix)
+                    threadDelay 500
+                    loop (n + 1 :: Int)
+          loop (0 :: Int)
+
+        takeMVar started
+        threadDelay 1000 -- Let writer get going
+
+        -- Read via getCF on snapshot
+        v1 <- getCF snapDB cf "key1"
+        threadDelay 10000
+        v2 <- getCF snapDB cf "key2"
+        threadDelay 10000
+        v3 <- getCF snapDB cf "key3"
+
+        -- Read via iterator on same snapshot (using the same column family)
+        iterEntries <- withIterCF snapDB cf $ \itr -> do
+          iterFirst itr
+          let collect acc = do
+                valid <- iterValid itr
+                if valid
+                  then do
+                    mentry <- iterEntry itr
+                    iterNext itr
+                    collect (mentry : acc)
+                  else pure (reverse acc)
+          catMaybes <$> collect []
+
+        -- Clean up
+        killThread writerThread
+        releaseSnapshot (snapDB, snap)
+
+        -- Verify: getCF and iterator see the same original values
+        v1 `shouldBe` Just "val1"
+        v2 `shouldBe` Just "val2"
+        v3 `shouldBe` Just "val3"
+        iterEntries `shouldBe` [("key1", "val1"), ("key2", "val2"), ("key3", "val3")]
