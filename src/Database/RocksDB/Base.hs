@@ -18,6 +18,8 @@ module Database.RocksDB.Base
     , BatchOp (..)
     , Range
     , ColumnFamily
+    , Snapshot
+    , ReadOpts
 
     -- * Options
     , Config (..)
@@ -180,16 +182,21 @@ snapshot db =
     fst . snd <$> allocate (createSnapshot db) releaseSnapshot
 
 -- | Manually create an unmanaged snapshot.
+-- The returned 'DB' has 'readOpts' configured for the snapshot.
+-- Use 'releaseSnapshot' to release both the snapshot and its read options.
 createSnapshot :: MonadIO m => DB -> m (DB, Snapshot)
 createSnapshot db@DB{rocksDB = db_ptr} = liftIO $ do
     snap_ptr <- c_rocksdb_create_snapshot db_ptr
-    withReadOpts (Just snap_ptr) $ \read_opts ->
-        return (db{readOpts = read_opts}, snap_ptr)
+    read_opts <- createReadOpts (Just snap_ptr)
+    return (db{readOpts = read_opts}, snap_ptr)
 
 -- | Function to release an unmanaged snapshot.
+-- Also releases the read options associated with the snapshot DB.
 releaseSnapshot :: MonadIO m => (DB, Snapshot) -> m ()
-releaseSnapshot (DB{rocksDB = db_ptr}, snap_ptr) =
-    liftIO $ c_rocksdb_release_snapshot db_ptr snap_ptr
+releaseSnapshot (DB{rocksDB = db_ptr, readOpts = read_opts}, snap_ptr) =
+    liftIO $ do
+        destroyReadOpts read_opts
+        c_rocksdb_release_snapshot db_ptr snap_ptr
 
 -- | Get a DB property.
 getProperty :: MonadIO m => DB -> Property -> m (Maybe ByteString)

@@ -17,6 +17,8 @@ module Database.RocksDB.Internal
     , withOptions
     , withOptionsCF
     , withReadOpts
+    , createReadOpts
+    , destroyReadOpts
     , withWriteOpts
 
     -- * Utilities
@@ -95,13 +97,20 @@ withOptionsCF cfgs f =
 withReadOpts :: MonadUnliftIO m => Maybe Snapshot -> (ReadOpts -> m a) -> m a
 withReadOpts maybe_snap_ptr =
     bracket
-    create_read_opts
+    (createReadOpts maybe_snap_ptr)
     (liftIO . c_rocksdb_readoptions_destroy)
-  where
-    create_read_opts = liftIO $ do
-        read_opts_ptr <- c_rocksdb_readoptions_create
-        forM_ maybe_snap_ptr $ c_rocksdb_readoptions_set_snapshot read_opts_ptr
-        return read_opts_ptr
+
+-- | Create read options without bracket management.
+-- Caller is responsible for calling 'destroyReadOpts'.
+createReadOpts :: MonadIO m => Maybe Snapshot -> m ReadOpts
+createReadOpts maybe_snap_ptr = liftIO $ do
+    read_opts_ptr <- c_rocksdb_readoptions_create
+    forM_ maybe_snap_ptr $ c_rocksdb_readoptions_set_snapshot read_opts_ptr
+    return read_opts_ptr
+
+-- | Destroy read options created with 'createReadOpts'.
+destroyReadOpts :: MonadIO m => ReadOpts -> m ()
+destroyReadOpts = liftIO . c_rocksdb_readoptions_destroy
 
 withWriteOpts :: MonadUnliftIO m => (WriteOpts -> m a) -> m a
 withWriteOpts =
