@@ -1,3 +1,7 @@
+## 2.3.0
+
+ * Remove UnliftIO and remain in IO monad.
+
 ## 2.2.0
 
  * Move Iterator module to plain IO.

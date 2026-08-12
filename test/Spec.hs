@@ -3,15 +3,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 
-import Control.Concurrent (forkIO, killThread, threadDelay)
+import Control.Concurrent
+import Control.Concurrent.Async
 import Control.Monad
 import Data.ByteString.Char8 qualified as C
 import Data.Default (def)
 import Data.Maybe
 import Database.RocksDB
+import System.IO.Temp
 import Test.Hspec
 import Text.Printf
-import UnliftIO
 
 conf :: Config
 conf =
@@ -22,7 +23,7 @@ conf =
       prefixLength = Just 3
     }
 
-withTestDBCF :: (MonadUnliftIO m) => [String] -> (DB -> m a) -> m a
+withTestDBCF :: [String] -> (DB -> IO a) -> IO a
 withTestDBCF cfs go =
   withSystemTempDirectory "rocksdb-tests-cf" $ \path ->
     withDBCF path conf (map (,conf) cfs) go

@@ -35,7 +35,6 @@ module Database.RocksDB.Base
     , get
     , getCF
     , withSnapshot
-    , snapshot
     , createSnapshot
     , releaseSnapshot
 
@@ -49,18 +48,23 @@ module Database.RocksDB.Base
     , module Database.RocksDB.Iterator
     ) where
 
+import           Control.Exception
 import           Control.Monad             (forM, when, (>=>))
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import           Data.ByteString.Internal  (ByteString (..))
 import qualified Data.ByteString.Unsafe    as BU
+import           Data.Int
 import           Database.RocksDB.C
 import           Database.RocksDB.Internal
 import           Database.RocksDB.Iterator
-import           UnliftIO
-import           UnliftIO.Directory
-import           UnliftIO.Foreign
-import           UnliftIO.Resource
+import           Foreign.C.String
+import           Foreign.ForeignPtr
+import           Foreign.Marshal.Alloc
+import           Foreign.Marshal.Array
+import           Foreign.Ptr
+import           Foreign.Storable
+import           System.Directory
 
 -- | Properties exposed by RocksDB
 data Property = NumFilesAtLevel Int | Stats | SSTables
@@ -76,20 +80,19 @@ data BatchOp = Put !ByteString !ByteString
 --
 -- The returned handle will be automatically released with 'close'
 -- when the function exits.
-withDB :: MonadUnliftIO m => FilePath -> Config -> (DB -> m a) -> m a
+withDB :: FilePath -> Config -> (DB -> IO a) -> IO a
 withDB path config f =
     withOptions config $ \opts_ptr ->
     withReadOpts Nothing $ \read_opts ->
     withWriteOpts $ \write_opts ->
     bracket (create_db opts_ptr read_opts write_opts) destroy_db f
   where
-    destroy_db db = liftIO $
-        c_rocksdb_close $ rocksDB db
+    destroy_db db = c_rocksdb_close $ rocksDB db
     create_db opts_ptr read_opts write_opts = do
         when (createIfMissing config) $
             createDirectoryIfMissing True path
         withCString path $ \path_ptr -> do
-            db_ptr <- liftIO . throwIfErr "open" $
+            db_ptr <- throwIfErr "open" $
                 c_rocksdb_open opts_ptr path_ptr
             return DB { rocksDB = db_ptr
                       , columnFamilies = []
@@ -97,12 +100,11 @@ withDB path config f =
                       , writeOpts = write_opts
                       }
 
-withDBCF :: MonadUnliftIO m
-         => FilePath
+withDBCF :: FilePath
          -> Config
          -> [(String, Config)]
-         -> (DB -> m a)
-         -> m a
+         -> (DB -> IO a)
+         -> IO a
 withDBCF path config cf_cfgs f =
     withOptions config $ \opts_ptr ->
     withOptionsCF (map snd cf_cfgs) $ \cf_opts ->
@@ -125,7 +127,7 @@ withDBCF path config cf_cfgs f =
     create_new cf_names cf_opts opts_ptr read_opts write_opts = do
         createDirectoryIfMissing True path
         withCString path $ \path_ptr -> do
-            db_ptr <- liftIO . throwIfErr "open" $
+            db_ptr <- throwIfErr "open" $
                 c_rocksdb_open opts_ptr path_ptr
             cfs <- forM (zip cf_names cf_opts) $ \(n, o) ->
                 throwIfErr "create_column_family" $
@@ -136,7 +138,7 @@ withDBCF path config cf_cfgs f =
                       , readOpts = read_opts
                       , writeOpts = write_opts
                       }
-    destroy_db db = liftIO $ do
+    destroy_db db = do
         mapM_ c_rocksdb_column_family_handle_destroy (columnFamilies db)
         c_rocksdb_close $ rocksDB db
     create_db opts_ptr
@@ -146,7 +148,7 @@ withDBCF path config cf_cfgs f =
               cf_opts_array
               read_opts
               cf_ptrs_array
-              write_opts = liftIO $ do
+              write_opts = do
         when (createIfMissing config) $
             createDirectoryIfMissing True path
         listDirectory path >>= \case
@@ -172,35 +174,29 @@ withDBCF path config cf_cfgs f =
 
 -- | Run an action with a snapshot of the database.
 -- The 'DB' object is not valid after the action ends.
-withSnapshot :: MonadUnliftIO m => DB -> (DB -> m a) -> m a
+withSnapshot :: DB -> (DB -> IO a) -> IO a
 withSnapshot db f =
     bracket (createSnapshot db) releaseSnapshot (f . fst)
-
--- | The 'DB' snapshot is not valid outside of 'MonadResource'.
-snapshot :: (MonadIO m, MonadResource m) => DB -> m DB
-snapshot db =
-    fst . snd <$> allocate (createSnapshot db) releaseSnapshot
 
 -- | Manually create an unmanaged snapshot.
 -- The returned 'DB' has 'readOpts' configured for the snapshot.
 -- Use 'releaseSnapshot' to release both the snapshot and its read options.
-createSnapshot :: MonadIO m => DB -> m (DB, Snapshot)
-createSnapshot db@DB{rocksDB = db_ptr} = liftIO $ do
+createSnapshot :: DB -> IO (DB, Snapshot)
+createSnapshot db@DB{rocksDB = db_ptr} = do
     snap_ptr <- c_rocksdb_create_snapshot db_ptr
     read_opts <- createReadOpts (Just snap_ptr)
     return (db{readOpts = read_opts}, snap_ptr)
 
 -- | Function to release an unmanaged snapshot.
 -- Also releases the read options associated with the snapshot DB.
-releaseSnapshot :: MonadIO m => (DB, Snapshot) -> m ()
-releaseSnapshot (DB{rocksDB = db_ptr, readOpts = read_opts}, snap_ptr) =
-    liftIO $ do
-        destroyReadOpts read_opts
-        c_rocksdb_release_snapshot db_ptr snap_ptr
+releaseSnapshot :: (DB, Snapshot) -> IO ()
+releaseSnapshot (DB{rocksDB = db_ptr, readOpts = read_opts}, snap_ptr) = do
+  destroyReadOpts read_opts
+  c_rocksdb_release_snapshot db_ptr snap_ptr
 
 -- | Get a DB property.
-getProperty :: MonadIO m => DB -> Property -> m (Maybe ByteString)
-getProperty DB{rocksDB = db_ptr} p = liftIO $
+getProperty :: DB -> Property -> IO (Maybe ByteString)
+getProperty DB{rocksDB = db_ptr} p =
     withCString (prop p) $
     c_rocksdb_property_value db_ptr >=> \case
     val_ptr | val_ptr == nullPtr -> return Nothing
@@ -214,14 +210,14 @@ getProperty DB{rocksDB = db_ptr} p = liftIO $
     prop SSTables            = "rocksdb.sstables"
 
 -- | Destroy the given RocksDB database.
-destroy :: MonadIO m => FilePath -> Options -> m ()
-destroy path opts_ptr = liftIO $
+destroy :: FilePath -> Options -> IO ()
+destroy path opts_ptr =
     withCString path $ \path_ptr ->
     throwIfErr "destroy" $ c_rocksdb_destroy_db opts_ptr path_ptr
 
 -- | Repair the given RocksDB database.
-repair :: MonadIO m => FilePath -> Options -> m ()
-repair path opts_ptr = liftIO $
+repair :: FilePath -> Options -> IO ()
+repair path opts_ptr =
     withCString path $ \path_ptr ->
     throwIfErr "repair" $ c_rocksdb_repair_db opts_ptr path_ptr
 
@@ -230,8 +226,8 @@ repair path opts_ptr = liftIO $
 type Range  = (ByteString, ByteString)
 
 -- | Inspect the approximate sizes of the different levels.
-approximateSize :: MonadIO m => DB -> Range -> m Int64
-approximateSize DB{rocksDB = db_ptr} (from, to) = liftIO $
+approximateSize :: DB -> Range -> IO Int64
+approximateSize DB{rocksDB = db_ptr} (from, to) =
     BU.unsafeUseAsCStringLen from $ \(from_ptr, flen) ->
     BU.unsafeUseAsCStringLen to   $ \(to_ptr, tlen)   ->
     withArray [from_ptr]          $ \from_ptrs        ->
@@ -249,14 +245,14 @@ approximateSize DB{rocksDB = db_ptr} (from, to) = liftIO $
         toInt64 = return . fromIntegral
 
 -- | Write a key/value pair.
-put :: MonadIO m => DB -> ByteString -> ByteString -> m ()
+put :: DB -> ByteString -> ByteString -> IO ()
 put db = putCommon db Nothing
 
-putCF :: MonadIO m => DB -> ColumnFamily -> ByteString -> ByteString -> m ()
+putCF :: DB -> ColumnFamily -> ByteString -> ByteString -> IO ()
 putCF db cf = putCommon db (Just cf)
 
-putCommon :: MonadIO m => DB -> Maybe ColumnFamily -> ByteString -> ByteString -> m ()
-putCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key value = liftIO $
+putCommon :: DB -> Maybe ColumnFamily -> ByteString -> ByteString -> IO ()
+putCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key value =
     BU.unsafeUseAsCStringLen key   $ \(key_ptr, klen) ->
     BU.unsafeUseAsCStringLen value $ \(val_ptr, vlen) ->
         throwIfErr "put" $ case mcf of
@@ -270,14 +266,14 @@ putCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key value = liftIO $
                       val_ptr (intToCSize vlen)
 
 -- | Read a value by key.
-get :: MonadIO m => DB -> ByteString -> m (Maybe ByteString)
+get :: DB -> ByteString -> IO (Maybe ByteString)
 get db = getCommon db Nothing
 
-getCF :: MonadIO m => DB -> ColumnFamily -> ByteString -> m (Maybe ByteString)
+getCF :: DB -> ColumnFamily -> ByteString -> IO (Maybe ByteString)
 getCF db cf = getCommon db (Just cf)
 
-getCommon :: MonadIO m => DB -> Maybe ColumnFamily -> ByteString -> m (Maybe ByteString)
-getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key = liftIO $
+getCommon :: DB -> Maybe ColumnFamily -> ByteString -> IO (Maybe ByteString)
+getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key =
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
     alloca                       $ \vlen_ptr -> do
         val_ptr <- throwIfErr "get" $
@@ -295,23 +291,23 @@ getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key = liftIO $
                 res <- BU.unsafePackMallocCStringLen (val_ptr, cSizeToInt vlen)
                 return $ Just res
 
-delete :: MonadIO m => DB -> ByteString -> m ()
+delete :: DB -> ByteString -> IO ()
 delete db = deleteCommon db Nothing
 
-deleteCF :: MonadIO m => DB -> ColumnFamily -> ByteString -> m ()
+deleteCF :: DB -> ColumnFamily -> ByteString -> IO ()
 deleteCF db cf = deleteCommon db (Just cf)
 
 -- | Delete a key/value pair.
-deleteCommon :: MonadIO m => DB -> Maybe ColumnFamily -> ByteString -> m ()
-deleteCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key = liftIO $
+deleteCommon :: DB -> Maybe ColumnFamily -> ByteString -> IO ()
+deleteCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key =
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
     throwIfErr "delete" $ case mcf of
     Just cf -> c_rocksdb_delete_cf db_ptr write_opts cf key_ptr (intToCSize klen)
     Nothing -> c_rocksdb_delete db_ptr write_opts key_ptr (intToCSize klen)
 
 -- | Perform a batch mutation.
-write :: MonadIO m => DB -> [BatchOp] -> m ()
-write DB{rocksDB = db_ptr, writeOpts = write_opts} batch = liftIO $
+write :: DB -> [BatchOp] -> IO ()
+write DB{rocksDB = db_ptr, writeOpts = write_opts} batch =
     bracket
     c_rocksdb_writebatch_create
     c_rocksdb_writebatch_destroy $ \batch_ptr -> do
@@ -358,7 +354,7 @@ write DB{rocksDB = db_ptr, writeOpts = write_opts} batch = liftIO $
     touch (DelCF _ (PS p _ _)) =
         touchForeignPtr p
 
-withStrings :: MonadUnliftIO m => [String] -> ([CString] -> m a) -> m a
+withStrings :: [String] -> ([CString] -> IO a) -> IO a
 withStrings ss f =
     go [] ss
   where
