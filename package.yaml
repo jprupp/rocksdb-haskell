@@ -1,5 +1,5 @@
 name: rocksdb-haskell-jprupp
-version: 2.1.7
+version: 2.2.0
 synopsis: Haskell bindings for RocksDB
 description: See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 maintainer: JP Rupp <jprupp@protonmail.ch>

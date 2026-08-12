@@ -1,3 +1,10 @@
+## 2.2.0
+
+ * Move Iterator module to plain IO.
+ * Properly manage read options in createSnapshot.
+ * Add nix flake for development.
+ * API allows manual database lifecycle management.
+
 ## 2.1.7
 
  * Simplify author name.
