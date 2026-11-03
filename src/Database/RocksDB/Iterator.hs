@@ -38,6 +38,7 @@ module Database.RocksDB.Iterator
 where
 
 import Control.Exception (bracket)
+import Control.Monad (when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Unsafe qualified as BU
@@ -188,20 +189,24 @@ iterLast = c_rocksdb_iter_seek_to_last
 -- | Moves to the next entry in the source. After this call, 'iterValid' is
 -- /true/ iff the iterator was not positioned at the last entry in the source.
 --
--- If the iterator is not valid, this function does nothing. Note that this is a
--- shortcoming of the C API: an 'iterPrev' might still be possible, but we can't
--- determine if we're at the last or first entry.
+-- If the iterator is not valid, this function does nothing: RocksDB does not
+-- allow moving an invalid iterator, so reposition it with 'iterSeek',
+-- 'iterFirst' or 'iterLast' instead.
 iterNext :: Iterator -> IO ()
-iterNext = c_rocksdb_iter_next
+iterNext it = do
+    valid <- iterValid it
+    when valid $ c_rocksdb_iter_next it
 
 -- | Moves to the previous entry in the source. After this call, 'iterValid' is
 -- /true/ iff the iterator was not positioned at the first entry in the source.
 --
--- If the iterator is not valid, this function does nothing. Note that this is a
--- shortcoming of the C API: an 'iterNext' might still be possible, but we can't
--- determine if we're at the last or first entry.
+-- If the iterator is not valid, this function does nothing: RocksDB does not
+-- allow moving an invalid iterator, so reposition it with 'iterSeek',
+-- 'iterFirst' or 'iterLast' instead.
 iterPrev :: Iterator -> IO ()
-iterPrev = c_rocksdb_iter_prev
+iterPrev it = do
+    valid <- iterValid it
+    when valid $ c_rocksdb_iter_prev it
 
 -- | Return the key for the current entry if the iterator is currently
 -- positioned at an entry, ie. 'iterValid'.

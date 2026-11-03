@@ -105,9 +105,9 @@ main = do
           iterPrev itr -- Invalid before lowest key
           iterKey itr `shouldReturn` Nothing
           iterValue itr `shouldReturn` Nothing
-          iterNext itr -- But it remembers previous position
-          iterKey itr `shouldReturn` Just "b"
-          iterValue itr `shouldReturn` Just "bbb"
+          iterNext itr -- Invalid iterator stays invalid
+          iterKey itr `shouldReturn` Nothing
+          iterValue itr `shouldReturn` Nothing
     describe "Snapshots" $ do
       it "getCF and iterator see same data during concurrent writes" $ \db -> do
         let cf = head $ columnFamilies db

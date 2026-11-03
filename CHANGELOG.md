@@ -1,3 +1,7 @@
+## 2.3.1
+
+ * Do not call next/prev on invalid iterators (fixes assertion failure).
+
 ## 2.3.0
 
  * Remove UnliftIO and remain in IO monad.
