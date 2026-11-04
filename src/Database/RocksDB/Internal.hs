@@ -48,6 +48,9 @@ data DB = DB { rocksDB        :: !RocksDB
 data Config = Config { createIfMissing :: !Bool
                      , errorIfExists   :: !Bool
                      , paranoidChecks  :: !Bool
+                     , createMissingColumnFamilies :: !Bool
+                       -- ^ create the column families passed to 'withDBCF'
+                       -- that an existing database does not have yet
                      , maxFiles        :: !(Maybe Int)
                      , prefixLength    :: !(Maybe Int)
                      , bloomFilter     :: !Bool
@@ -58,17 +61,25 @@ data Config = Config { createIfMissing :: !Bool
                        -- ^ bytes for all memtables across all column
                        -- families (RocksDB default unlimited); database-wide,
                        -- ignored in column family configs
+                     , maxTotalWalSize :: !(Maybe Int)
+                       -- ^ bytes of write-ahead log after which the column
+                       -- families holding the oldest log are flushed, so it
+                       -- can be deleted (RocksDB default: four times the
+                       -- memtables); database-wide, ignored in column family
+                       -- configs
                      } deriving (Eq, Show)
 
 instance Default Config where
     def = Config { createIfMissing  = False
                  , errorIfExists    = False
                  , paranoidChecks   = False
+                 , createMissingColumnFamilies = False
                  , maxFiles         = Nothing
                  , prefixLength     = Nothing
                  , bloomFilter      = False
                  , writeBufferSize  = Nothing
                  , dbWriteBufferSize = Nothing
+                 , maxTotalWalSize  = Nothing
                  }
 
 withOptions :: Config -> (Options -> IO a) -> IO a
@@ -87,12 +98,16 @@ withOptions Config {..} f = with_opts $ \opts -> do
         c_rocksdb_options_set_write_buffer_size opts . intToCSize
     forM_ dbWriteBufferSize $
         c_rocksdb_options_set_db_write_buffer_size opts . intToCSize
+    forM_ maxTotalWalSize $
+        c_rocksdb_options_set_max_total_wal_size opts . fromIntegral
     c_rocksdb_options_set_create_if_missing
         opts (boolToCBool createIfMissing)
     c_rocksdb_options_set_error_if_exists
         opts (boolToCBool errorIfExists)
     c_rocksdb_options_set_paranoid_checks
         opts (boolToCBool paranoidChecks)
+    c_rocksdb_options_set_create_missing_column_families
+        opts (boolToCBool createMissingColumnFamilies)
     f opts
   where
     with_opts =

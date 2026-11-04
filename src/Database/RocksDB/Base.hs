@@ -39,7 +39,7 @@ module Database.RocksDB.Base
     , releaseSnapshot
 
     -- * Administrative Functions
-    , Property (..), getProperty
+    , Property (..), getProperty, getPropertyCF
     , destroy
     , repair
     , approximateSize
@@ -67,7 +67,19 @@ import           Foreign.Storable
 import           System.Directory
 
 -- | Properties exposed by RocksDB
-data Property = NumFilesAtLevel Int | Stats | SSTables
+data Property
+    = NumFilesAtLevel Int
+    | Stats
+    | SSTables
+    -- | @rocksdb.estimate-table-readers-mem@: memory for index and filter
+    -- blocks of open table files, outside the block cache
+    | EstimateTableReadersMem
+    -- | @rocksdb.cur-size-all-mem-tables@: memory of all memtables
+    | CurSizeAllMemTables
+    -- | @rocksdb.block-cache-usage@: memory used by the block cache
+    | BlockCacheUsage
+    -- | any other property, by its full name
+    | PropertyName String
     deriving (Eq, Show)
 
 data BatchOp = Put !ByteString !ByteString
@@ -165,9 +177,15 @@ withDBCF path config cf_cfgs f =
                         cf_names_array
                         cf_opts_array
                         cf_ptrs_array
-                    cfs <- peekArray (length cf_cfgs + 1) cf_ptrs_array
+                    (deflt, cfs) <- peekArray (length cf_cfgs + 1) cf_ptrs_array >>= \case
+                        d : cs -> return (d, cs)
+                        [] -> error "rocksdb_open_column_families returned no handles"
+                    -- Every handle must be destroyed before the database is
+                    -- closed. The default column family is not kept, so
+                    -- release its handle now; the database keeps its own.
+                    c_rocksdb_column_family_handle_destroy deflt
                     return DB { rocksDB = db_ptr
-                              , columnFamilies = tail cfs
+                              , columnFamilies = cfs
                               , readOpts = read_opts
                               , writeOpts = write_opts
                               }
@@ -197,17 +215,33 @@ releaseSnapshot (DB{rocksDB = db_ptr, readOpts = read_opts}, snap_ptr) = do
 -- | Get a DB property.
 getProperty :: DB -> Property -> IO (Maybe ByteString)
 getProperty DB{rocksDB = db_ptr} p =
-    withCString (prop p) $
-    c_rocksdb_property_value db_ptr >=> \case
-    val_ptr | val_ptr == nullPtr -> return Nothing
-            | otherwise -> do
-                  res <- Just <$> BS.packCString val_ptr
-                  freeCString val_ptr
-                  return res
-  where
-    prop (NumFilesAtLevel i) = "rocksdb.num-files-at-level" ++ show i
-    prop Stats               = "rocksdb.stats"
-    prop SSTables            = "rocksdb.sstables"
+    withCString (propertyName p) $ \name ->
+    c_rocksdb_property_value db_ptr name >>= propertyResult
+
+-- | Get a property of a column family. Many properties, such as the memory
+-- of memtables and table readers, are kept per column family.
+getPropertyCF :: DB -> ColumnFamily -> Property -> IO (Maybe ByteString)
+getPropertyCF DB{rocksDB = db_ptr} cf p =
+    withCString (propertyName p) $ \name ->
+    c_rocksdb_property_value_cf db_ptr cf name >>= propertyResult
+
+propertyResult :: CString -> IO (Maybe ByteString)
+propertyResult val_ptr
+    | val_ptr == nullPtr = return Nothing
+    | otherwise = do
+          res <- BS.packCString val_ptr
+          freeCString val_ptr
+          return (Just res)
+
+propertyName :: Property -> String
+propertyName = \case
+    NumFilesAtLevel i       -> "rocksdb.num-files-at-level" ++ show i
+    Stats                   -> "rocksdb.stats"
+    SSTables                -> "rocksdb.sstables"
+    EstimateTableReadersMem -> "rocksdb.estimate-table-readers-mem"
+    CurSizeAllMemTables     -> "rocksdb.cur-size-all-mem-tables"
+    BlockCacheUsage         -> "rocksdb.block-cache-usage"
+    PropertyName n          -> n
 
 -- | Destroy the given RocksDB database.
 destroy :: FilePath -> Options -> IO ()
