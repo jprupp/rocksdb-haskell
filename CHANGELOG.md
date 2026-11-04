@@ -1,3 +1,12 @@
+## 2.5.0
+
+ * Add the `EstimateTableReadersMem`, `CurSizeAllMemTables` and
+   `BlockCacheUsage` properties, and `PropertyName` for any other property by
+   its name.
+ * Add `getPropertyCF` to read a property of a column family.
+ * Add `maxTotalWalSize` (`max_total_wal_size`) to `Config`, to bound the
+   write-ahead log.
+
 ## 2.4.0
 
  * Add `writeBufferSize` (`write_buffer_size`) and `dbWriteBufferSize`

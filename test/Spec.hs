@@ -250,3 +250,22 @@ main = do
             getCF db two (key 20000) `shouldReturn` Just value
             files <- getProperty db SSTables
             files `shouldSatisfy` maybe False (not . C.null)
+    describe "Properties" $ do
+      it "reports memory use, per database and per column family" $ \db -> do
+        let one = head (columnFamilies db)
+            isNumber = maybe False (\v -> not (C.null v) && C.all (`elem` ['0' .. '9']) v)
+        forM_ [1 .. 1000 :: Int] $ \i -> putCF db one (C.pack (show i)) "value"
+        mem <- getPropertyCF db one CurSizeAllMemTables
+        mem `shouldSatisfy` isNumber
+        mem `shouldSatisfy` maybe False ((> 0) . read . C.unpack)
+        getProperty db EstimateTableReadersMem >>= (`shouldSatisfy` isNumber)
+        getProperty db BlockCacheUsage >>= (`shouldSatisfy` isNumber)
+        getProperty db (PropertyName "rocksdb.num-immutable-mem-table")
+          >>= (`shouldSatisfy` isNumber)
+        getProperty db (PropertyName "rocksdb.no-such-property")
+          `shouldReturn` Nothing
+      it "opens with a bound on the write-ahead log" $ \_ ->
+        withSystemTempDirectory "rocksdb-tests-wal" $ \path ->
+          withDBCF path conf {maxTotalWalSize = Just (1024 * 1024)} [("one", conf)] $ \db -> do
+            put db "key" "value"
+            get db "key" `shouldReturn` Just "value"
