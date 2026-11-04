@@ -76,6 +76,7 @@ module Database.RocksDB.C
     , c_rocksdb_options_set_write_buffer_size
     , c_rocksdb_options_set_db_write_buffer_size
     , c_rocksdb_options_set_max_total_wal_size
+    , c_rocksdb_options_set_create_missing_column_families
     , c_rocksdb_options_set_prefix_extractor
     , c_rocksdb_options_set_block_based_table_factory
     , c_rocksdb_block_based_options_create
@@ -386,6 +387,9 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_set_db_write_buffer_size"
 
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_max_total_wal_size"
   c_rocksdb_options_set_max_total_wal_size :: Options -> Word64 -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_create_missing_column_families"
+  c_rocksdb_options_set_create_missing_column_families :: Options -> CBool -> IO ()
 
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_prefix_extractor"
   c_rocksdb_options_set_prefix_extractor :: Options

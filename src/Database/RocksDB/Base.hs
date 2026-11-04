@@ -177,9 +177,15 @@ withDBCF path config cf_cfgs f =
                         cf_names_array
                         cf_opts_array
                         cf_ptrs_array
-                    cfs <- peekArray (length cf_cfgs + 1) cf_ptrs_array
+                    (deflt, cfs) <- peekArray (length cf_cfgs + 1) cf_ptrs_array >>= \case
+                        d : cs -> return (d, cs)
+                        [] -> error "rocksdb_open_column_families returned no handles"
+                    -- Every handle must be destroyed before the database is
+                    -- closed. The default column family is not kept, so
+                    -- release its handle now; the database keeps its own.
+                    c_rocksdb_column_family_handle_destroy deflt
                     return DB { rocksDB = db_ptr
-                              , columnFamilies = tail cfs
+                              , columnFamilies = cfs
                               , readOpts = read_opts
                               , writeOpts = write_opts
                               }

@@ -48,6 +48,9 @@ data DB = DB { rocksDB        :: !RocksDB
 data Config = Config { createIfMissing :: !Bool
                      , errorIfExists   :: !Bool
                      , paranoidChecks  :: !Bool
+                     , createMissingColumnFamilies :: !Bool
+                       -- ^ create the column families passed to 'withDBCF'
+                       -- that an existing database does not have yet
                      , maxFiles        :: !(Maybe Int)
                      , prefixLength    :: !(Maybe Int)
                      , bloomFilter     :: !Bool
@@ -70,6 +73,7 @@ instance Default Config where
     def = Config { createIfMissing  = False
                  , errorIfExists    = False
                  , paranoidChecks   = False
+                 , createMissingColumnFamilies = False
                  , maxFiles         = Nothing
                  , prefixLength     = Nothing
                  , bloomFilter      = False
@@ -102,6 +106,8 @@ withOptions Config {..} f = with_opts $ \opts -> do
         opts (boolToCBool errorIfExists)
     c_rocksdb_options_set_paranoid_checks
         opts (boolToCBool paranoidChecks)
+    c_rocksdb_options_set_create_missing_column_families
+        opts (boolToCBool createMissingColumnFamilies)
     f opts
   where
     with_opts =

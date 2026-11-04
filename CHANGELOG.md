@@ -6,6 +6,11 @@
  * Add `getPropertyCF` to read a property of a column family.
  * Add `maxTotalWalSize` (`max_total_wal_size`) to `Config`, to bound the
    write-ahead log.
+ * Add `createMissingColumnFamilies` (`create_missing_column_families`) to
+   `Config`, to add column families to an existing database.
+ * Destroy the handle of the default column family when `withDBCF` opens an
+   existing database. It was leaked, and RocksDB built with assertions
+   aborted when the database was closed.
 
 ## 2.4.0
 

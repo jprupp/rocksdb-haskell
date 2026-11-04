@@ -269,3 +269,13 @@ main = do
           withDBCF path conf {maxTotalWalSize = Just (1024 * 1024)} [("one", conf)] $ \db -> do
             put db "key" "value"
             get db "key" `shouldReturn` Just "value"
+    describe "Column families" $ do
+      it "adds a column family to an existing database" $ \_ ->
+        withSystemTempDirectory "rocksdb-tests-newcf" $ \path -> do
+          let open = conf {errorIfExists = False}
+          withDBCF path open [("one", open)] $ \db -> put db "key" "value"
+          withDBCF path open {createMissingColumnFamilies = True} [("one", open), ("two", open)] $ \db -> do
+            get db "key" `shouldReturn` Just "value"
+            let two = columnFamilies db !! 1
+            putCF db two "new" "cf"
+            getCF db two "new" `shouldReturn` Just "cf"
