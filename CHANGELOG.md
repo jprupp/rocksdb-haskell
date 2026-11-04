@@ -1,3 +1,8 @@
+## 2.4.0
+
+ * Add `writeBufferSize` (`write_buffer_size`) and `dbWriteBufferSize`
+   (`db_write_buffer_size`) to `Config`, to bound memtable memory.
+
 ## 2.3.1
 
  * Do not call next/prev on invalid iterators (fixes assertion failure).
