@@ -51,6 +51,13 @@ data Config = Config { createIfMissing :: !Bool
                      , maxFiles        :: !(Maybe Int)
                      , prefixLength    :: !(Maybe Int)
                      , bloomFilter     :: !Bool
+                     , writeBufferSize :: !(Maybe Int)
+                       -- ^ bytes per memtable (RocksDB default 64 MiB);
+                       -- per column family
+                     , dbWriteBufferSize :: !(Maybe Int)
+                       -- ^ bytes for all memtables across all column
+                       -- families (RocksDB default unlimited); database-wide,
+                       -- ignored in column family configs
                      } deriving (Eq, Show)
 
 instance Default Config where
@@ -60,6 +67,8 @@ instance Default Config where
                  , maxFiles         = Nothing
                  , prefixLength     = Nothing
                  , bloomFilter      = False
+                 , writeBufferSize  = Nothing
+                 , dbWriteBufferSize = Nothing
                  }
 
 withOptions :: Config -> (Options -> IO a) -> IO a
@@ -74,6 +83,10 @@ withOptions Config {..} f = with_opts $ \opts -> do
         c_rocksdb_options_set_prefix_extractor opts t
     forM_ maxFiles $
         c_rocksdb_options_set_max_open_files opts . intToCInt
+    forM_ writeBufferSize $
+        c_rocksdb_options_set_write_buffer_size opts . intToCSize
+    forM_ dbWriteBufferSize $
+        c_rocksdb_options_set_db_write_buffer_size opts . intToCSize
     c_rocksdb_options_set_create_if_missing
         opts (boolToCBool createIfMissing)
     c_rocksdb_options_set_error_if_exists

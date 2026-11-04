@@ -227,3 +227,26 @@ main = do
         forM_ mReadOpts destroyReadOpts
         (k1, v1) `shouldBe` (Just "m", Just "10")
         (k2, v2) `shouldBe` (Just "n", Just "20")
+    describe "Write buffers" $ do
+      it "flushes small memtables and keeps the data" $ \_ -> do
+        let small =
+              conf
+                { writeBufferSize = Just (64 * 1024),
+                  dbWriteBufferSize = Just (256 * 1024)
+                }
+            cfConf = small {dbWriteBufferSize = Nothing}
+            key :: Int -> C.ByteString
+            key i = C.pack (printf "k%07d" i)
+            value = C.replicate 100 'v'
+        withSystemTempDirectory "rocksdb-tests-wb" $ \path ->
+          withDBCF path small [("one", cfConf), ("two", cfConf)] $ \db -> do
+            let [one, two] = columnFamilies db
+            forM_ [1 .. 20000] $ \i -> do
+              put db (key i) value
+              putCF db one (key i) value
+              putCF db two (key i) value
+            get db (key 1) `shouldReturn` Just value
+            getCF db one (key 10000) `shouldReturn` Just value
+            getCF db two (key 20000) `shouldReturn` Just value
+            files <- getProperty db SSTables
+            files `shouldSatisfy` maybe False (not . C.null)

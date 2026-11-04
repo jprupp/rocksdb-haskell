@@ -72,6 +72,8 @@ module Database.RocksDB.C
     , c_rocksdb_options_set_error_if_exists
     , c_rocksdb_options_set_paranoid_checks
     , c_rocksdb_options_set_max_open_files
+    , c_rocksdb_options_set_write_buffer_size
+    , c_rocksdb_options_set_db_write_buffer_size
     , c_rocksdb_options_set_prefix_extractor
     , c_rocksdb_options_set_block_based_table_factory
     , c_rocksdb_block_based_options_create
@@ -370,6 +372,12 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_set_paranoid_checks"
 
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_max_open_files"
   c_rocksdb_options_set_max_open_files :: Options -> CInt -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_write_buffer_size"
+  c_rocksdb_options_set_write_buffer_size :: Options -> CSize -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_db_write_buffer_size"
+  c_rocksdb_options_set_db_write_buffer_size :: Options -> CSize -> IO ()
 
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_prefix_extractor"
   c_rocksdb_options_set_prefix_extractor :: Options
