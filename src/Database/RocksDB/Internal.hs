@@ -71,6 +71,13 @@ data DB = DB { rocksDB        :: !RocksDB
 --
 -- Some fields only apply to the database as a whole and are ignored in the
 -- configuration of a column family. This is noted on each field.
+--
+-- Most fields exist to control memory. RocksDB's defaults suit a small database:
+-- each column family gets its own cache, the index and filter blocks of every
+-- open file stay in memory, and memtables are not capped as a whole. On a large
+-- database these grow without bound. Setting 'maxFiles', 'blockCacheSize',
+-- 'cacheIndexAndFilterBlocks' and 'dbWriteBufferSize' turns that into a fixed
+-- budget.
 data Config = Config { createIfMissing :: !Bool
                        -- ^ create the database if it does not exist
                      , errorIfExists   :: !Bool
@@ -196,6 +203,9 @@ withOptionsCFCache cache cfgs f =
 
 -- | The block cache of 'blockCacheSize', if it is set. The database and
 -- column families that use it keep it alive after this returns.
+--
+-- A single cache for the whole database lets RocksDB give memory to whichever
+-- column family is busy, instead of fixing a share for each.
 withBlockCache :: Config -> (Maybe Cache -> IO a) -> IO a
 withBlockCache Config {blockCacheSize = Nothing} f = f Nothing
 withBlockCache Config {blockCacheSize = Just n} f =
@@ -238,6 +248,10 @@ freeCString = c_rocksdb_free
 -- | Run a C function that takes an error pointer as its last argument. If the
 -- function sets an error, free it and throw an 'IOError' whose message starts
 -- with the given operation name.
+--
+-- Every C function that can fail reports it this way, so this is the one place
+-- where RocksDB errors become Haskell exceptions, and where their messages are
+-- freed.
 throwIfErr :: String -> (ErrPtr -> IO a) -> IO a
 throwIfErr s f = alloca $ \err_ptr -> do
     poke err_ptr nullPtr

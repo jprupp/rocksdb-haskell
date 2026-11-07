@@ -31,6 +31,21 @@
 --
 -- After iterating, check 'iterGetError' to tell the end of the data apart from
 -- an error such as corruption.
+--
+-- = Why iterators
+--
+-- Sorted keys are what make RocksDB more than a hash table. Keys that share a
+-- prefix are stored next to each other, so all the records of one user, or all
+-- the transactions of one address, can be read with one seek and a short scan.
+-- Designing keys so that the records you read together sort together is the
+-- most important performance decision in a RocksDB schema.
+--
+-- = Safety
+--
+-- The C API crashes the process if an invalid iterator is moved, and the bytes
+-- it returns are only valid until it moves again. This module guards against
+-- both: 'iterNext' and 'iterPrev' do nothing on an invalid iterator, and keys
+-- and values are copied into Haskell memory before they are returned.
 module Database.RocksDB.Iterator
   ( Iterator,
     -- * Bracket-style iteration
@@ -220,6 +235,9 @@ iterLast = c_rocksdb_iter_seek_to_last
 -- If the iterator is not valid, this function does nothing: RocksDB does not
 -- allow moving an invalid iterator, so reposition it with 'iterSeek',
 -- 'iterFirst' or 'iterLast' instead.
+--
+-- The check costs one cheap call and turns a crash in C into a harmless no-op,
+-- which is the right trade for a Haskell binding.
 iterNext :: Iterator -> IO ()
 iterNext it = do
     valid <- iterValid it
@@ -238,6 +256,9 @@ iterPrev it = do
 
 -- | Return the key for the current entry if the iterator is currently
 -- positioned at an entry, ie. 'iterValid'.
+--
+-- The key is copied, because RocksDB reuses the memory behind it as soon as the
+-- iterator moves.
 iterKey :: Iterator -> IO (Maybe ByteString)
 iterKey it = iterString it c_rocksdb_iter_key
 
