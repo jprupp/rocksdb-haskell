@@ -15,7 +15,10 @@ module Database.RocksDB.Internal
 
     -- * Smart constructors & extractors
     , withOptions
+    , withOptionsCache
     , withOptionsCF
+    , withOptionsCFCache
+    , withBlockCache
     , withReadOpts
     , createReadOpts
     , destroyReadOpts
@@ -34,6 +37,7 @@ module Database.RocksDB.Internal
 import           Control.Exception
 import           Control.Monad
 import           Data.Default
+import           Data.Maybe        (isJust)
 import           Database.RocksDB.C
 import           Foreign
 import           Foreign.C.String
@@ -61,6 +65,17 @@ data Config = Config { createIfMissing :: !Bool
                        -- ^ bytes for all memtables across all column
                        -- families (RocksDB default unlimited); database-wide,
                        -- ignored in column family configs
+                     , blockCacheSize :: !(Maybe Int)
+                       -- ^ bytes of a least-recently-used block cache shared
+                       -- by the database and all its column families
+                       -- ('Nothing': RocksDB gives each column family its
+                       -- own default cache, of 32 MiB in RocksDB 8);
+                       -- database-wide, ignored in column family configs
+                     , cacheIndexAndFilterBlocks :: !Bool
+                       -- ^ keep index and filter blocks in the block cache,
+                       -- at high priority, with those of level 0 pinned,
+                       -- instead of in memory outside it for every open
+                       -- file; per column family
                      , maxTotalWalSize :: !(Maybe Int)
                        -- ^ bytes of write-ahead log after which the column
                        -- families holding the oldest log are flushed, so it
@@ -79,16 +94,31 @@ instance Default Config where
                  , bloomFilter      = False
                  , writeBufferSize  = Nothing
                  , dbWriteBufferSize = Nothing
+                 , blockCacheSize   = Nothing
+                 , cacheIndexAndFilterBlocks = False
                  , maxTotalWalSize  = Nothing
                  }
 
 withOptions :: Config -> (Options -> IO a) -> IO a
-withOptions Config {..} f = with_opts $ \opts -> do
-    when bloomFilter $ do
-        fp <- c_rocksdb_filterpolicy_create_bloom_full 10
-        bo <- c_rocksdb_block_based_options_create
-        c_rocksdb_block_based_options_set_filter_policy bo fp
-        c_rocksdb_options_set_block_based_table_factory opts bo
+withOptions = withOptionsCache Nothing
+
+-- | Options of a database or column family that use this block cache, if
+-- any.
+withOptionsCache :: Maybe Cache -> Config -> (Options -> IO a) -> IO a
+withOptionsCache cache Config {..} f = with_opts $ \opts -> do
+    when (bloomFilter || isJust cache || cacheIndexAndFilterBlocks) $
+        bracket c_rocksdb_block_based_options_create
+                c_rocksdb_block_based_options_destroy $ \bo -> do
+            when bloomFilter $ do
+                fp <- c_rocksdb_filterpolicy_create_bloom_full 10
+                c_rocksdb_block_based_options_set_filter_policy bo fp
+            forM_ cache $ c_rocksdb_block_based_options_set_block_cache bo
+            when cacheIndexAndFilterBlocks $ do
+                c_rocksdb_block_based_options_set_cache_index_and_filter_blocks bo 1
+                c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority bo 1
+                c_rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache bo 1
+            -- the table factory copies the options, filter policy and cache
+            c_rocksdb_options_set_block_based_table_factory opts bo
     forM_ prefixLength $ \l -> do
         t <- c_rocksdb_slicetransform_create_fixed_prefix (intToCSize l)
         c_rocksdb_options_set_prefix_extractor opts t
@@ -117,11 +147,24 @@ withOptions Config {..} f = with_opts $ \opts -> do
 
 
 withOptionsCF :: [Config] -> ([Options] -> IO a) -> IO a
-withOptionsCF cfgs f =
+withOptionsCF = withOptionsCFCache Nothing
+
+-- | Options of column families that use this block cache, if any.
+withOptionsCFCache :: Maybe Cache -> [Config] -> ([Options] -> IO a) -> IO a
+withOptionsCFCache cache cfgs f =
     go [] cfgs
   where
     go acc [] = f (reverse acc)
-    go acc (c:cs) = withOptions c $ \o -> go (o:acc) cs
+    go acc (c:cs) = withOptionsCache cache c $ \o -> go (o:acc) cs
+
+-- | The block cache of 'blockCacheSize', if it is set. The database and
+-- column families that use it keep it alive after this returns.
+withBlockCache :: Config -> (Maybe Cache -> IO a) -> IO a
+withBlockCache Config {blockCacheSize = Nothing} f = f Nothing
+withBlockCache Config {blockCacheSize = Just n} f =
+    bracket (c_rocksdb_cache_create_lru (intToCSize n))
+            c_rocksdb_cache_destroy
+            (f . Just)
 
 withReadOpts :: Maybe Snapshot -> (ReadOpts -> IO a) -> IO a
 withReadOpts maybe_snap_ptr =

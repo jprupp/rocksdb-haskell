@@ -43,6 +43,20 @@ main = do
         putCF db two "two_key" "two_value"
         getCF db two "two_key" `shouldReturn` Just "two_value"
         get db "two_key" `shouldReturn` Nothing
+    describe "Multi-get" $ do
+      it "reads many keys at once, in order, with missing ones" $ \db -> do
+        let one = head (columnFamilies db)
+        forM_ [1 .. 100 :: Int] $ \i -> do
+          put db (C.pack (show i)) (C.pack ("v" <> show i))
+          putCF db one (C.pack (show i)) (C.pack ("one" <> show i))
+        let keys = map (C.pack . show) [50, 0, 1, 100, 101, 50 :: Int]
+        multiGet db keys
+          `shouldReturn` [Just "v50", Nothing, Just "v1", Just "v100", Nothing, Just "v50"]
+        multiGetCF db one keys
+          `shouldReturn` [Just "one50", Nothing, Just "one1", Just "one100", Nothing, Just "one50"]
+        multiGet db [] `shouldReturn` []
+        ks <- forM [1 .. 2000 :: Int] $ \i -> return (C.pack (show (i `mod` 150)))
+        multiGet db ks >>= (`shouldBe` map (\k -> if read (C.unpack k) `elem` [1 .. 100 :: Int] then Just ("v" <> k) else Nothing) ks)
     describe "Multithreading" $ do
       it "stores and retrieve items from multiple threads" $ \db -> do
         let key i = C.pack $ printf "key_%04d" i
@@ -264,6 +278,34 @@ main = do
           >>= (`shouldSatisfy` isNumber)
         getProperty db (PropertyName "rocksdb.no-such-property")
           `shouldReturn` Nothing
+      it "shares one block cache, holding index and filter blocks" $ \_ -> do
+        let size = 8 * 1024 * 1024
+            cached =
+              conf
+                { errorIfExists = False,
+                  blockCacheSize = Just size,
+                  cacheIndexAndFilterBlocks = True,
+                  writeBufferSize = Just (64 * 1024)
+                }
+            key :: Int -> C.ByteString
+            key i = C.pack (printf "k%07d" i)
+            value = C.replicate 100 'v'
+            capacity d cf =
+              maybe (getProperty d p) (\c -> getPropertyCF d c p) cf
+              where
+                p = PropertyName "rocksdb.block-cache-capacity"
+        withSystemTempDirectory "rocksdb-tests-cache" $ \path -> do
+          withDBCF path cached [("one", cached)] $ \db -> do
+            let one = head (columnFamilies db)
+            forM_ [1 .. 20000] $ \i -> putCF db one (key i) value
+          withDBCF path cached [("one", cached)] $ \db -> do
+            let one = head (columnFamilies db)
+            capacity db Nothing `shouldReturn` Just (C.pack (show size))
+            capacity db (Just one) `shouldReturn` Just (C.pack (show size))
+            multiGetCF db one (map key [1, 10000, 20000])
+              `shouldReturn` replicate 3 (Just value)
+            usage <- getProperty db BlockCacheUsage
+            usage `shouldSatisfy` maybe False ((> 0) . (read :: String -> Int) . C.unpack)
       it "opens with a bound on the write-ahead log" $ \_ ->
         withSystemTempDirectory "rocksdb-tests-wal" $ \path ->
           withDBCF path conf {maxTotalWalSize = Just (1024 * 1024)} [("one", conf)] $ \db -> do
