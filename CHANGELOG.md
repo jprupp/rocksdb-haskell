@@ -1,3 +1,7 @@
+## 2.6.1
+
+ * Documentation, lots of it, with detailed explanations.
+
 ## 2.6.0
 
  * Add `multiGet` and `multiGetCF`, which read the values of many keys in
