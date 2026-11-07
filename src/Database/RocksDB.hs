@@ -1,3 +1,54 @@
+-- |
+-- Module      : Database.RocksDB
+-- Copyright   : (c) 2012-2013 The leveldb-haskell Authors
+--               (c) 2014-2020 The rocksdb-haskell Authors
+--               (c) 2025 JP Rupp
+-- License     : BSD3
+-- Maintainer  : jprupp@protonmail.ch
+-- Stability   : experimental
+-- Portability : non-portable
+--
+-- Haskell bindings to <https://rocksdb.org RocksDB>, an embedded persistent
+-- key-value store.
+--
+-- This is the only module that needs to be imported. It re-exports
+-- "Database.RocksDB.Base", which in turn re-exports the iterator functions.
+--
+-- = Quick start
+--
+-- @
+-- -- with OverloadedStrings
+-- import Data.Default (def)
+-- import Database.RocksDB
+--
+-- main :: IO ()
+-- main =
+--     'withDB' "\/tmp\/example" def{'createIfMissing' = True} $ \\db -> do
+--         'put' db "hello" "world"
+--         'get' db "hello" >>= print            -- Just "world"
+--         'write' db ['Put' "a" "1", 'Put' "b" "2", 'Del' "hello"]
+--         'withIter' db $ \\it -> do
+--             'iterFirst' it
+--             'iterEntry' it >>= print          -- Just ("a","1")
+-- @
+--
+-- = Keys and values
+--
+-- Keys and values are strict 'Data.ByteString.ByteString's. RocksDB orders keys
+-- lexicographically by their bytes, which is the order used by iterators.
+--
+-- = Column families
+--
+-- A database can hold several independent key spaces called column families.
+-- Open such a database with 'withDBCF'. The handles for the extra column
+-- families are found in 'columnFamilies', in the same order as they were passed
+-- to 'withDBCF'. Functions ending in @CF@ act on a given column family; the
+-- others act on the default column family.
+--
+-- = Errors
+--
+-- Errors reported by RocksDB are thrown as 'IOError' exceptions created with
+-- 'userError', with a message that names the failing operation.
 module Database.RocksDB (module Base) where
 
 import Database.RocksDB.Base as Base

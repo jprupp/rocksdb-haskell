@@ -8,6 +8,9 @@
 -- Stability   : experimental
 -- Portability : non-portable
 --
+-- Internal types and helpers shared by the other modules. The 'DB' and 'Config'
+-- types are re-exported by "Database.RocksDB"; everything else is an
+-- implementation detail.
 
 module Database.RocksDB.Internal
     ( Config (..)
@@ -43,21 +46,50 @@ import           Foreign
 import           Foreign.C.String
 import           Foreign.C.Types
 
+-- | Handle to an open database. Obtain one with 'Database.RocksDB.withDB' or
+-- 'Database.RocksDB.withDBCF'. It is only valid inside the function passed to
+-- those, and can be shared between threads.
 data DB = DB { rocksDB        :: !RocksDB
+               -- ^ pointer to the C database object
              , columnFamilies :: ![ColumnFamily]
+               -- ^ handles of the column families opened with
+               -- 'Database.RocksDB.withDBCF', in the order they were given;
+               -- empty for 'Database.RocksDB.withDB'
              , readOpts       :: !ReadOpts
+               -- ^ read options used by reads and iterators; set to read from
+               -- a snapshot by 'Database.RocksDB.withSnapshot'
              , writeOpts      :: !WriteOpts
+               -- ^ write options used by all writes
              }
 
+-- | Configuration of a database or column family. Use 'def' for the defaults
+-- and override the fields you need:
+--
+-- @
+-- def { 'createIfMissing' = True, 'bloomFilter' = True }
+-- @
+--
+-- Some fields only apply to the database as a whole and are ignored in the
+-- configuration of a column family. This is noted on each field.
 data Config = Config { createIfMissing :: !Bool
+                       -- ^ create the database if it does not exist
                      , errorIfExists   :: !Bool
+                       -- ^ fail to open if the database already exists
                      , paranoidChecks  :: !Bool
+                       -- ^ check data aggressively and stop early on any
+                       -- corruption
                      , createMissingColumnFamilies :: !Bool
                        -- ^ create the column families passed to 'withDBCF'
                        -- that an existing database does not have yet
                      , maxFiles        :: !(Maybe Int)
+                       -- ^ maximum number of files RocksDB keeps open
+                       -- ('Nothing': RocksDB default, unlimited)
                      , prefixLength    :: !(Maybe Int)
+                       -- ^ length in bytes of a fixed key prefix, used by
+                       -- bloom filters and prefix seeks
                      , bloomFilter     :: !Bool
+                       -- ^ use a full bloom filter with 10 bits per key to
+                       -- skip files that cannot contain a key
                      , writeBufferSize :: !(Maybe Int)
                        -- ^ bytes per memtable (RocksDB default 64 MiB);
                        -- per column family
@@ -84,6 +116,7 @@ data Config = Config { createIfMissing :: !Bool
                        -- configs
                      } deriving (Eq, Show)
 
+-- | All flags off and all sizes left to RocksDB defaults.
 instance Default Config where
     def = Config { createIfMissing  = False
                  , errorIfExists    = False
@@ -99,11 +132,13 @@ instance Default Config where
                  , maxTotalWalSize  = Nothing
                  }
 
+-- | Create RocksDB options from a 'Config' and pass them to a function. The
+-- options are destroyed when it returns.
 withOptions :: Config -> (Options -> IO a) -> IO a
 withOptions = withOptionsCache Nothing
 
 -- | Options of a database or column family that use this block cache, if
--- any.
+-- any. The options are destroyed when the function returns.
 withOptionsCache :: Maybe Cache -> Config -> (Options -> IO a) -> IO a
 withOptionsCache cache Config {..} f = with_opts $ \opts -> do
     when (bloomFilter || isJust cache || cacheIndexAndFilterBlocks) $
@@ -146,6 +181,8 @@ withOptionsCache cache Config {..} f = with_opts $ \opts -> do
         c_rocksdb_options_destroy
 
 
+-- | Create options for several column families at once, in the same order as
+-- the configurations.
 withOptionsCF :: [Config] -> ([Options] -> IO a) -> IO a
 withOptionsCF = withOptionsCFCache Nothing
 
@@ -166,6 +203,8 @@ withBlockCache Config {blockCacheSize = Just n} f =
             c_rocksdb_cache_destroy
             (f . Just)
 
+-- | Create read options, reading from a snapshot if one is given, and pass them
+-- to a function. They are destroyed when it returns.
 withReadOpts :: Maybe Snapshot -> (ReadOpts -> IO a) -> IO a
 withReadOpts maybe_snap_ptr =
     bracket
@@ -184,15 +223,21 @@ createReadOpts maybe_snap_ptr = do
 destroyReadOpts :: ReadOpts -> IO ()
 destroyReadOpts = c_rocksdb_readoptions_destroy
 
+-- | Create default write options and pass them to a function. They are
+-- destroyed when it returns.
 withWriteOpts :: (WriteOpts -> IO a) -> IO a
 withWriteOpts =
     bracket
     c_rocksdb_writeoptions_create
     c_rocksdb_writeoptions_destroy
 
+-- | Free a C string allocated by RocksDB.
 freeCString :: CString -> IO ()
 freeCString = c_rocksdb_free
 
+-- | Run a C function that takes an error pointer as its last argument. If the
+-- function sets an error, free it and throw an 'IOError' whose message starts
+-- with the given operation name.
 throwIfErr :: String -> (ErrPtr -> IO a) -> IO a
 throwIfErr s f = alloca $ \err_ptr -> do
     poke err_ptr nullPtr
@@ -204,27 +249,33 @@ throwIfErr s f = alloca $ \err_ptr -> do
         throwIO $ userError $ s ++ ": " ++ err
     return res
 
+-- | Convert a 'Bool' to a C boolean.
 boolToCBool :: Bool -> CBool
 boolToCBool True  = 1
 boolToCBool False = 0
 {-# INLINE boolToCBool #-}
 
+-- | Convert a 'CSize' to an 'Int'.
 cSizeToInt :: CSize -> Int
 cSizeToInt = fromIntegral
 {-# INLINE cSizeToInt #-}
 
+-- | Convert an 'Int' to a 'CSize'.
 intToCSize :: Int -> CSize
 intToCSize = fromIntegral
 {-# INLINE intToCSize #-}
 
+-- | Convert an 'Int' to a 'CInt'.
 intToCInt :: Int -> CInt
 intToCInt = fromIntegral
 {-# INLINE intToCInt #-}
 
+-- | Convert a 'CInt' to an 'Int'.
 cIntToInt :: CInt -> Int
 cIntToInt = fromIntegral
 {-# INLINE cIntToInt #-}
 
+-- | Convert a 'Bool' to @1@ or @0@.
 boolToNum :: Num b => Bool -> b
 boolToNum True  = fromIntegral (1 :: Int)
 boolToNum False = fromIntegral (0 :: Int)

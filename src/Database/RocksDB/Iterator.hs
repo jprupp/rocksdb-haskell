@@ -11,6 +11,26 @@
 -- Portability : non-portable
 --
 -- Iterating over key ranges.
+--
+-- An 'Iterator' walks the keys of a database or column family in ascending
+-- byte order. It starts out not positioned anywhere; call 'iterFirst',
+-- 'iterLast' or 'iterSeek' to position it, then 'iterNext' or 'iterPrev' to
+-- move. Read the current entry with 'iterKey', 'iterValue' or 'iterEntry',
+-- which return 'Nothing' once the iterator has moved past either end.
+--
+-- @
+-- -- all entries whose key starts with "user:"
+-- usersFrom :: DB -> IO [(ByteString, ByteString)]
+-- usersFrom db = 'withIter' db $ \\it -> do
+--     'iterSeek' it "user:"
+--     let go acc = 'iterEntry' it >>= \\case
+--             Just (k, v) | "user:" \`B.isPrefixOf\` k -> 'iterNext' it >> go ((k, v) : acc)
+--             _ -> return (reverse acc)
+--     go []
+-- @
+--
+-- After iterating, check 'iterGetError' to tell the end of the data apart from
+-- an error such as corruption.
 module Database.RocksDB.Iterator
   ( Iterator,
     -- * Bracket-style iteration
@@ -59,6 +79,7 @@ import Foreign.C.Types (CSize)
 withIter :: DB -> (Iterator -> IO a) -> IO a
 withIter db = withIterCommon db Nothing Nothing
 
+-- | Like 'withIter', but iterate over the given column family.
 withIterCF :: DB -> ColumnFamily -> (Iterator -> IO a) -> IO a
 withIterCF db cf = withIterCommon db Nothing (Just cf)
 
@@ -88,6 +109,8 @@ withIterSnapCF
     -> IO a
 withIterSnapCF db msnap cf = withIterCommon db msnap (Just cf)
 
+-- | Create an iterator over the default column family, or over a column family
+-- if one is given, reading from a snapshot if one is given.
 withIterCommon
     :: DB
     -> Maybe Snapshot
@@ -116,7 +139,11 @@ withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
             Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
             Nothing -> c_rocksdb_create_iterator rocks_db ro
 
--- | Manually create unmanaged iterator.
+-- | Manually create unmanaged iterator, over the default column family or over
+-- a column family if one is given. It uses the 'readOpts' of the 'DB', so if
+-- the 'DB' comes from 'Database.RocksDB.withSnapshot' it reads from that
+-- snapshot. It must be released with 'destroyIterator', and must not outlive
+-- the 'DB'.
 createIterator :: DB -> Maybe ColumnFamily -> IO Iterator
 createIterator DB{rocksDB = rocks_db, readOpts = read_opts} mcf =
     throwErrnoIfNull "create_iterator" $ case mcf of
@@ -157,7 +184,8 @@ createIteratorWithOpts DB{rocksDB = rocks_db} ro mcf =
         Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
         Nothing -> c_rocksdb_create_iterator rocks_db ro
 
--- | Destroy unmanaged iterator.
+-- | Destroy unmanaged iterator created with 'createIterator' or
+-- 'createIteratorSnap'. It must not be used afterwards.
 destroyIterator :: Iterator -> IO ()
 destroyIterator = c_rocksdb_iter_destroy
 
@@ -229,6 +257,9 @@ iterEntry it = do
 -- | Check for errors
 --
 -- Note that this captures somewhat severe errors such as a corrupted database.
+-- An iterator that becomes invalid because of an error looks the same as one
+-- that reached the end of the data, so call this after iterating to tell them
+-- apart. Returns 'Nothing' if there was no error.
 iterGetError :: Iterator -> IO (Maybe ByteString)
 iterGetError iter_ptr = alloca $ \err_ptr -> do
     poke err_ptr nullPtr
@@ -242,6 +273,8 @@ iterGetError iter_ptr = alloca $ \err_ptr -> do
 -- Internal
 --
 
+-- | Read a C string from the iterator using the given accessor, if the
+-- iterator is valid. The string is copied, since it belongs to the iterator.
 iterString ::
     Iterator ->
     (Iterator -> Ptr CSize -> IO CString) ->
