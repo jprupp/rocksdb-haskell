@@ -10,7 +10,14 @@
 --
 -- RocksDB Haskell binding.
 --
--- The API closely follows the C-API of RocksDB.
+-- The API closely follows the C-API of RocksDB. All resources (databases,
+-- snapshots, iterators) are managed with bracket-style functions such as
+-- 'withDB', 'withSnapshot' and 'withIter', which release them when the
+-- supplied action returns or throws. Manual variants such as 'createSnapshot'
+-- and 'createIterator' exist for cases where the lifetime of a resource cannot
+-- be expressed as a scope.
+--
+-- A 'DB' handle is safe to use from many threads at once.
 
 module Database.RocksDB.Base
     ( -- * Exported Types
@@ -69,10 +76,15 @@ import           Foreign.Ptr
 import           Foreign.Storable
 import           System.Directory
 
--- | Properties exposed by RocksDB
+-- | Properties exposed by RocksDB. Read them with 'getProperty' or
+-- 'getPropertyCF'. Every value is returned by RocksDB as text.
 data Property
+    -- | @rocksdb.num-files-at-level\<N\>@: number of SST files at level @N@
     = NumFilesAtLevel Int
+    -- | @rocksdb.stats@: multi-line human-readable statistics
     | Stats
+    -- | @rocksdb.sstables@: description of the SST files that make up the
+    -- database
     | SSTables
     -- | @rocksdb.estimate-table-readers-mem@: memory for index and filter
     -- blocks of open table files, outside the block cache
@@ -85,16 +97,27 @@ data Property
     | PropertyName String
     deriving (Eq, Show)
 
+-- | A single operation in an atomic batch written with 'write'.
 data BatchOp = Put !ByteString !ByteString
+               -- ^ set a key to a value in the default column family
              | Del !ByteString
+               -- ^ delete a key from the default column family
              | PutCF !ColumnFamily !ByteString !ByteString
+               -- ^ set a key to a value in a column family
              | DelCF !ColumnFamily !ByteString
+               -- ^ delete a key from a column family
              deriving (Eq, Show)
 
--- | Open a database.
+-- | Open a database at the given path and pass its handle to a function.
 --
--- The returned handle will be automatically released with 'close'
--- when the function exits.
+-- The handle is closed automatically when the function returns or throws, and
+-- must not be used afterwards. If 'createIfMissing' is set, the directory is
+-- created first if needed. Throws an 'IOError' if the database cannot be
+-- opened, for example if it does not exist and 'createIfMissing' is not set,
+-- or if it is locked by another process.
+--
+-- Only the default column family is opened. A database that has other column
+-- families must be opened with 'withDBCF'.
 withDB :: FilePath -> Config -> (DB -> IO a) -> IO a
 withDB path config f =
     withBlockCache config $ \cache ->
@@ -116,6 +139,20 @@ withDB path config f =
                       , writeOpts = write_opts
                       }
 
+-- | Open a database with column families and pass its handle to a function.
+--
+-- The second argument configures the database and its default column family.
+-- The third argument lists the other column families by name, each with its own
+-- 'Config'. Their handles are stored in 'columnFamilies', in the same order.
+--
+-- If the database directory is empty, a new database is created along with all
+-- the listed column families. Otherwise the existing database is opened with
+-- those column families; if some of them do not exist yet, the open fails unless
+-- 'createMissingColumnFamilies' is set in the database 'Config'. RocksDB also
+-- requires every column family that exists in the database to be listed.
+--
+-- The handle and all column family handles are released when the function
+-- returns or throws.
 withDBCF :: FilePath
          -> Config
          -> [(String, Config)]
@@ -197,6 +234,11 @@ withDBCF path config cf_cfgs f =
 
 -- | Run an action with a snapshot of the database.
 -- The 'DB' object is not valid after the action ends.
+--
+-- The 'DB' passed to the action reads from a consistent point-in-time view of
+-- the database: 'get', 'multiGet' and iterators created from it do not see
+-- writes made after the snapshot was taken. Writes through it still go to the
+-- live database.
 withSnapshot :: DB -> (DB -> IO a) -> IO a
 withSnapshot db f =
     bracket (createSnapshot db) releaseSnapshot (f . fst)
@@ -217,7 +259,8 @@ releaseSnapshot (DB{rocksDB = db_ptr, readOpts = read_opts}, snap_ptr) = do
   destroyReadOpts read_opts
   c_rocksdb_release_snapshot db_ptr snap_ptr
 
--- | Get a DB property.
+-- | Get a property of the default column family, or of the database as a
+-- whole. Returns 'Nothing' if RocksDB does not know the property.
 getProperty :: DB -> Property -> IO (Maybe ByteString)
 getProperty DB{rocksDB = db_ptr} p =
     withCString (propertyName p) $ \name ->
@@ -230,6 +273,8 @@ getPropertyCF DB{rocksDB = db_ptr} cf p =
     withCString (propertyName p) $ \name ->
     c_rocksdb_property_value_cf db_ptr cf name >>= propertyResult
 
+-- | Turn a property value returned by RocksDB into a 'ByteString', freeing the
+-- C string.
 propertyResult :: CString -> IO (Maybe ByteString)
 propertyResult val_ptr
     | val_ptr == nullPtr = return Nothing
@@ -238,6 +283,7 @@ propertyResult val_ptr
           freeCString val_ptr
           return (Just res)
 
+-- | The name RocksDB uses for a property.
 propertyName :: Property -> String
 propertyName = \case
     NumFilesAtLevel i       -> "rocksdb.num-files-at-level" ++ show i
@@ -248,23 +294,31 @@ propertyName = \case
     BlockCacheUsage         -> "rocksdb.block-cache-usage"
     PropertyName n          -> n
 
--- | Destroy the given RocksDB database.
+-- | Destroy the given RocksDB database, deleting all of its files. The
+-- database must not be open. Throws an 'IOError' on failure.
 destroy :: FilePath -> Options -> IO ()
 destroy path opts_ptr =
     withCString path $ \path_ptr ->
     throwIfErr "destroy" $ c_rocksdb_destroy_db opts_ptr path_ptr
 
--- | Repair the given RocksDB database.
+-- | Try to recover as much data as possible from a corrupted database. Some
+-- data may be lost. The database must not be open. Throws an 'IOError' on
+-- failure.
 repair :: FilePath -> Options -> IO ()
 repair path opts_ptr =
     withCString path $ \path_ptr ->
     throwIfErr "repair" $ c_rocksdb_repair_db opts_ptr path_ptr
 
 
+-- | A key range given as @(start, limit)@. The start key is included and the
+-- limit key is excluded.
+--
 -- TODO: support [Range], like C API does
 type Range  = (ByteString, ByteString)
 
--- | Inspect the approximate sizes of the different levels.
+-- | Approximate number of bytes of file system space used by the keys in a
+-- 'Range' of the default column family. Data still in memtables may not be
+-- counted.
 approximateSize :: DB -> Range -> IO Int64
 approximateSize DB{rocksDB = db_ptr} (from, to) =
     BU.unsafeUseAsCStringLen from $ \(from_ptr, flen) ->
@@ -283,13 +337,17 @@ approximateSize DB{rocksDB = db_ptr} (from, to) =
     where
         toInt64 = return . fromIntegral
 
--- | Write a key/value pair.
+-- | Write a key/value pair to the default column family, replacing any
+-- previous value. Throws an 'IOError' on failure.
 put :: DB -> ByteString -> ByteString -> IO ()
 put db = putCommon db Nothing
 
+-- | Like 'put', but write to the given column family.
 putCF :: DB -> ColumnFamily -> ByteString -> ByteString -> IO ()
 putCF db cf = putCommon db (Just cf)
 
+-- | Write a key/value pair to the default column family, or to a column family
+-- if one is given.
 putCommon :: DB -> Maybe ColumnFamily -> ByteString -> ByteString -> IO ()
 putCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key value =
     BU.unsafeUseAsCStringLen key   $ \(key_ptr, klen) ->
@@ -304,13 +362,17 @@ putCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key value =
                       key_ptr (intToCSize klen)
                       val_ptr (intToCSize vlen)
 
--- | Read a value by key.
+-- | Read a value by key from the default column family. Returns 'Nothing' if
+-- the key is not found. Throws an 'IOError' on failure.
 get :: DB -> ByteString -> IO (Maybe ByteString)
 get db = getCommon db Nothing
 
+-- | Like 'get', but read from the given column family.
 getCF :: DB -> ColumnFamily -> ByteString -> IO (Maybe ByteString)
 getCF db cf = getCommon db (Just cf)
 
+-- | Read a value from the default column family, or from a column family if one
+-- is given.
 getCommon :: DB -> Maybe ColumnFamily -> ByteString -> IO (Maybe ByteString)
 getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key =
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
@@ -333,7 +395,8 @@ getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key =
 -- | Read the values of many keys in one call. RocksDB looks the keys up
 -- together, sharing the work of finding the files and blocks that hold
 -- them, which is faster than reading them one by one. The values are in the
--- order of the keys.
+-- order of the keys, with 'Nothing' for keys that are not found. Duplicate keys
+-- are allowed. Throws an 'IOError' if any of the lookups fails.
 multiGet :: DB -> [ByteString] -> IO [Maybe ByteString]
 multiGet db = multiGetCommon db Nothing
 
@@ -341,6 +404,8 @@ multiGet db = multiGetCommon db Nothing
 multiGetCF :: DB -> ColumnFamily -> [ByteString] -> IO [Maybe ByteString]
 multiGetCF db cf = multiGetCommon db (Just cf)
 
+-- | Read many values from the default column family, or from a column family if
+-- one is given.
 multiGetCommon :: DB -> Maybe ColumnFamily -> [ByteString] -> IO [Maybe ByteString]
 multiGetCommon _ _ [] = return []
 multiGetCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf keys =
@@ -380,13 +445,17 @@ multiGetCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf keys =
             m : _ -> throwIO $ userError $ "multi_get: " ++ m
             [] -> return res
 
+-- | Delete a key from the default column family. Deleting a key that does not
+-- exist is not an error. Throws an 'IOError' on failure.
 delete :: DB -> ByteString -> IO ()
 delete db = deleteCommon db Nothing
 
+-- | Like 'delete', but delete from the given column family.
 deleteCF :: DB -> ColumnFamily -> ByteString -> IO ()
 deleteCF db cf = deleteCommon db (Just cf)
 
--- | Delete a key/value pair.
+-- | Delete a key/value pair from the default column family, or from a column
+-- family if one is given.
 deleteCommon :: DB -> Maybe ColumnFamily -> ByteString -> IO ()
 deleteCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key =
     BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
@@ -394,7 +463,10 @@ deleteCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key =
     Just cf -> c_rocksdb_delete_cf db_ptr write_opts cf key_ptr (intToCSize klen)
     Nothing -> c_rocksdb_delete db_ptr write_opts key_ptr (intToCSize klen)
 
--- | Perform a batch mutation.
+-- | Perform a batch mutation. All operations in the list are applied atomically:
+-- either all of them are written or none are. They are applied in order, so a
+-- later operation on a key overrides an earlier one. Throws an 'IOError' on
+-- failure.
 write :: DB -> [BatchOp] -> IO ()
 write DB{rocksDB = db_ptr, writeOpts = write_opts} batch =
     bracket
@@ -443,6 +515,8 @@ write DB{rocksDB = db_ptr, writeOpts = write_opts} batch =
     touch (DelCF _ (PS p _ _)) =
         touchForeignPtr p
 
+-- | Marshal a list of strings into C strings that are valid while the function
+-- runs.
 withStrings :: [String] -> ([CString] -> IO a) -> IO a
 withStrings ss f =
     go [] ss
