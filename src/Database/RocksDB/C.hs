@@ -16,6 +16,11 @@
 -- name without the @c_@ prefix. Functions that take an 'ErrPtr' report failure
 -- by storing a @malloc@-allocated error message in it, which the caller must
 -- free. See 'Database.RocksDB.Internal.throwIfErr'.
+--
+-- The bindings are @safe@ foreign calls. RocksDB calls can take a long time,
+-- for example when they wait for disk or for a compaction to make room, and a
+-- @safe@ call lets other Haskell threads keep running meanwhile. The small
+-- extra cost per call is worth that in a concurrent program.
 
 module Database.RocksDB.C
     ( RocksDB

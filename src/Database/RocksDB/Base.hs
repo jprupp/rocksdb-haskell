@@ -98,6 +98,11 @@ data Property
     deriving (Eq, Show)
 
 -- | A single operation in an atomic batch written with 'write'.
+--
+-- Batches are how a program keeps several keys consistent with each other: an
+-- index and the data it points to, for example, must change together or not at
+-- all. RocksDB applies a batch atomically and in one write to its log, so a batch
+-- is also much faster than the same writes made one by one.
 data BatchOp = Put !ByteString !ByteString
                -- ^ set a key to a value in the default column family
              | Del !ByteString
@@ -118,6 +123,10 @@ data BatchOp = Put !ByteString !ByteString
 --
 -- Only the default column family is opened. A database that has other column
 -- families must be opened with 'withDBCF'.
+--
+-- Opening is expensive and a database can only be opened by one process at a
+-- time, so open it once at program start and share the 'DB' between threads for
+-- the life of the program.
 withDB :: FilePath -> Config -> (DB -> IO a) -> IO a
 withDB path config f =
     withBlockCache config $ \cache ->
@@ -153,6 +162,11 @@ withDB path config f =
 --
 -- The handle and all column family handles are released when the function
 -- returns or throws.
+--
+-- Column families are separate key spaces in one database. They share the
+-- write-ahead log, so a batch can change several of them atomically, but each
+-- has its own files, memtables and tuning. Use them to keep data of different
+-- shapes apart, such as an index with short keys and a table of large values.
 withDBCF :: FilePath
          -> Config
          -> [(String, Config)]
@@ -239,6 +253,11 @@ withDBCF path config cf_cfgs f =
 -- the database: 'get', 'multiGet' and iterators created from it do not see
 -- writes made after the snapshot was taken. Writes through it still go to the
 -- live database.
+--
+-- Without a snapshot, two reads made one after the other can see different
+-- states of the database if another thread writes in between. Anything that
+-- reads several related keys and expects them to agree, such as an index and the
+-- records it points to, should read through a snapshot.
 withSnapshot :: DB -> (DB -> IO a) -> IO a
 withSnapshot db f =
     bracket (createSnapshot db) releaseSnapshot (f . fst)
@@ -397,6 +416,10 @@ getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key =
 -- them, which is faster than reading them one by one. The values are in the
 -- order of the keys, with 'Nothing' for keys that are not found. Duplicate keys
 -- are allowed. Throws an 'IOError' if any of the lookups fails.
+--
+-- For a query that needs hundreds of keys at once, such as the balances of many
+-- addresses, this cuts the time spent finding blocks and crossing into C to a
+-- fraction of separate 'get' calls.
 multiGet :: DB -> [ByteString] -> IO [Maybe ByteString]
 multiGet db = multiGetCommon db Nothing
 
@@ -467,6 +490,9 @@ deleteCommon DB{rocksDB = db_ptr, writeOpts = write_opts} mcf key =
 -- either all of them are written or none are. They are applied in order, so a
 -- later operation on a key overrides an earlier one. Throws an 'IOError' on
 -- failure.
+--
+-- The keys and values are kept alive until RocksDB has copied them, because
+-- they are handed to C as pointers into Haskell memory.
 write :: DB -> [BatchOp] -> IO ()
 write DB{rocksDB = db_ptr, writeOpts = write_opts} batch =
     bracket

@@ -17,9 +17,12 @@ are always released, even when an exception is thrown.
 
 ## Contents
 
+- [Why these bindings](#why-these-bindings)
+- [Design principles](#design-principles)
 - [Features](#features)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Tutorial: an event log](#tutorial-an-event-log)
 - [Concepts](#concepts)
 - [Usage guide](#usage-guide)
 - [Configuration](#configuration)
@@ -28,6 +31,48 @@ are always released, even when an exception is thrown.
 - [Development](#development)
 - [Related projects](#related-projects)
 - [License](#license)
+
+## Why these bindings
+
+RocksDB is a storage engine: a library that keeps sorted keys and values in
+files on local disk, with fast writes, fast point lookups and fast ordered
+scans. There is no server to run. It is what you reach for when SQLite's
+relational model is more than you need, and an in-memory map is not durable or
+big enough.
+
+These bindings exist because the Haskoin Bitcoin indexer needed them. It keeps
+the whole Bitcoin block chain indexed by address, transaction and block, which
+is hundreds of gigabytes, and serves queries from many threads while new
+blocks are written. That use shaped the library:
+
+- it must be safe to share one database between many threads;
+- resources must never leak, because the process runs for a long time;
+- memory outside the Haskell heap must be boundable, because RocksDB's defaults
+  let it grow with the size of the database;
+- the hot paths, such as reading many keys at once, must cost as little as the
+  C API allows.
+
+The library is a fork of `leveldb-haskell` and of earlier RocksDB bindings,
+maintained as `rocksdb-haskell-jprupp`.
+
+## Design principles
+
+- **Stay close to the C API.** Functions map nearly one to one to RocksDB's C
+  functions, so RocksDB's own documentation and tuning guides apply directly.
+  Conveniences such as typed keys live in separate libraries
+  ([rocksdb-query](https://github.com/jprupp/rocksdb-query)).
+- **Scope every resource.** Databases, snapshots and iterators are C objects
+  that must be freed once and never touched again. `withDB`, `withSnapshot` and
+  `withIter` free them when their block ends, even on an exception.
+- **Plain `IO`.** No monad transformer constraints. Lift into your own monad
+  with `liftIO`.
+- **Bytes in, bytes out.** Keys and values are strict `ByteString`s, which is
+  what RocksDB stores. How you serialize them is your choice.
+- **Don't crash in C.** RocksDB crashes the process if you misuse an iterator.
+  The Haskell side checks first and turns those cases into no-ops or
+  `Nothing`.
+- **Expose what bounds memory.** The few settings that turn RocksDB's memory
+  use into a fixed budget are first-class fields of `Config`.
 
 ## Features
 
@@ -74,6 +119,38 @@ nix-shell -p rocksdb
 The library links against `-lrocksdb`. If RocksDB is installed in a
 non-standard place, pass its directories with `--extra-include-dirs` and
 `--extra-lib-dirs` (Cabal or Stack).
+
+### Check the library is found
+
+```sh
+ls /usr/include/rocksdb/c.h        # or $(brew --prefix)/include/rocksdb/c.h
+pkg-config --modversion rocksdb    # prints the installed version, if registered
+```
+
+### Step by step with Stack
+
+1. Install [Stack](https://docs.haskellstack.org/) and the RocksDB library
+   (above).
+2. Create a project:
+
+   ```sh
+   stack new rocks-demo simple
+   cd rocks-demo
+   ```
+
+3. Add `rocksdb-haskell-jprupp`, `bytestring` and `data-default` to
+   `build-depends` in `rocks-demo.cabal`.
+4. Put the [quick start](#quick-start) program in `src/Main.hs` and run it:
+
+   ```sh
+   stack run
+   ```
+
+   It creates a database in `/tmp/example` and prints what it reads back.
+
+If the build fails with `cannot find -lrocksdb` or `rocksdb/c.h: No such file`,
+the C library is not where the compiler looks. Install the development package,
+or pass `--extra-include-dirs` and `--extra-lib-dirs`.
 
 ### With Cabal
 
@@ -135,6 +212,93 @@ main = do
               Nothing -> return ()
               Just kv -> print kv >> iterNext it >> loop
       loop
+```
+
+## Tutorial: an event log
+
+This builds a small append-only event log, to show how a RocksDB schema is
+designed around sorted keys.
+
+### 1. Design the keys
+
+RocksDB sorts keys by their bytes. Records read together should therefore sort
+together. Events are read per user and in time order, so the key is the user
+followed by a big-endian timestamp, which sorts numerically:
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Builder as BB
+import qualified Data.ByteString.Lazy as BL
+import Data.Word (Word64)
+
+eventKey :: ByteString -> Word64 -> ByteString
+eventKey user time =
+  BL.toStrict . BB.toLazyByteString $
+    BB.byteString user <> BB.char7 '/' <> BB.word64BE time
+```
+
+### 2. Write atomically
+
+An event and a per-user counter must stay consistent, so they go in one batch:
+
+```haskell
+import Database.RocksDB
+
+logEvent :: DB -> ByteString -> Word64 -> ByteString -> Int -> IO ()
+logEvent db user time payload count =
+  write db
+    [ Put (eventKey user time) payload,
+      Put ("count/" <> user) (BL.toStrict (BB.toLazyByteString (BB.intDec count)))
+    ]
+```
+
+If the program dies halfway, either both writes are there or neither is.
+
+### 3. Read a range with an iterator
+
+All events of a user sort together, so one seek and a short scan read them:
+
+```haskell
+eventsOf :: DB -> ByteString -> IO [ByteString]
+eventsOf db user = withIter db $ \it -> do
+  let prefix = user <> "/"
+  iterSeek it prefix
+  let go acc = do
+        mkv <- iterEntry it
+        case mkv of
+          Just (k, v) | prefix `B.isPrefixOf` k -> iterNext it >> go (v : acc)
+          _ -> return (reverse acc)
+  go []
+```
+
+### 4. Read consistently with a snapshot
+
+If another thread logs events while you read the counter and then the events,
+the two can disagree. Read both through a snapshot:
+
+```haskell
+report :: DB -> ByteString -> IO (Maybe ByteString, [ByteString])
+report db user = withSnapshot db $ \snap ->
+  (,) <$> get snap ("count/" <> user) <*> eventsOf snap user
+```
+
+### 5. Tune for size
+
+Once the log holds millions of events, open it with a memory budget and a Bloom
+filter for faster point lookups:
+
+```haskell
+let cfg =
+      def
+        { createIfMissing = True,
+          bloomFilter = True,
+          maxFiles = Just 1000,
+          blockCacheSize = Just (512 * 1024 * 1024),
+          cacheIndexAndFilterBlocks = True
+        }
 ```
 
 ## Concepts
@@ -254,6 +418,26 @@ yet, so in practice they are only usable from inside the library.
 | `cacheIndexAndFilterBlocks`   | column family   | Keep index and filter blocks in the block cache                 |
 
 Database-wide fields are ignored in the configuration of a column family.
+
+### Choosing a configuration
+
+RocksDB's defaults are tuned for small databases. Its memory use outside the
+Haskell heap comes from three places:
+
+1. **Memtables**, where recent writes collect before being flushed to disk.
+   Capped per column family by `writeBufferSize` and in total by
+   `dbWriteBufferSize`.
+2. **Index and filter blocks** of every open table file. Without
+   `cacheIndexAndFilterBlocks` they live outside any cache and grow with the
+   number of files; `maxFiles` limits how many are open.
+3. **The block cache** of recently read data. `blockCacheSize` makes one cache
+   shared by all column families, so memory goes where reads are.
+
+A reasonable starting point for a large database is a block cache of a few
+hundred megabytes to a few gigabytes, `cacheIndexAndFilterBlocks = True`,
+`maxFiles` of a few thousand, and `dbWriteBufferSize` of a few hundred
+megabytes. Enable `bloomFilter` when most reads are point lookups of keys that
+may not exist.
 
 For a large database, setting `maxFiles`, `blockCacheSize`,
 `cacheIndexAndFilterBlocks` and `dbWriteBufferSize` puts a ceiling on the memory

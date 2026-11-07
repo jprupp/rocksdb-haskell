@@ -11,6 +11,40 @@
 -- Haskell bindings to <https://rocksdb.org RocksDB>, an embedded persistent
 -- key-value store.
 --
+-- = Purpose
+--
+-- RocksDB is a fast embedded key-value store: a library, not a server, that
+-- keeps sorted keys and values in files on local disk. These bindings let a
+-- Haskell program use it as its storage engine. They were written for, and are
+-- used by, the Haskoin Bitcoin indexer, which keeps hundreds of
+-- gigabytes in RocksDB and reads them concurrently from many threads.
+--
+-- = Design
+--
+-- * __Close to the C API.__ The functions map almost one to one to RocksDB's C
+--   functions, so the RocksDB documentation applies directly and nothing is
+--   hidden behind an abstraction you would have to learn separately. Higher
+--   level conveniences, such as typed keys and values, belong in libraries on
+--   top, like @rocksdb-query@.
+--
+-- * __Resources are scoped.__ A database, a snapshot and an iterator are C
+--   objects that must be freed exactly once and never used afterwards. Every
+--   such resource has a @with@ function that frees it when the scope ends, even
+--   on an exception. Manual @create@ and @destroy@ functions exist for the cases
+--   where a lifetime cannot be a scope.
+--
+-- * __Plain 'IO'.__ Every function runs in 'IO'. Lifting into an application
+--   monad is left to the caller, which keeps the bindings free of monad
+--   transformer dependencies and keeps their types simple.
+--
+-- * __Bytes in, bytes out.__ Keys and values are strict
+--   'Data.ByteString.ByteString's, the representation RocksDB itself uses.
+--   Serialization is a separate concern.
+--
+-- * __Memory you can bound.__ RocksDB keeps a lot of memory outside the Haskell
+--   heap. 'Config' exposes the settings that put a ceiling on it, because an
+--   indexer that grows until the machine runs out of memory is not usable.
+--
 -- This is the only module that needs to be imported. It re-exports
 -- "Database.RocksDB.Base", which in turn re-exports the iterator functions.
 --
