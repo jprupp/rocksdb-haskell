@@ -1,3 +1,18 @@
+## 2.6.0
+
+ * Add `multiGet` and `multiGetCF`, which read the values of many keys in
+   one call to RocksDB's `MultiGet`.
+ * Add `blockCacheSize` to `Config`: the bytes of a least-recently-used block
+   cache shared by the database and all its column families. Without it
+   RocksDB gives each column family its own default cache, of 32 MiB in
+   RocksDB 8.
+ * Add `cacheIndexAndFilterBlocks` to `Config`, to keep the index and filter
+   blocks of a column family in the block cache, at high priority, with
+   those of level 0 pinned, instead of in memory outside the cache for every
+   open file.
+ * Stop leaking the block-based table options of every database and column
+   family opened with a Bloom filter.
+
 ## 2.5.0
 
  * Add the `EstimateTableReadersMem`, `CurSizeAllMemTables` and

@@ -34,6 +34,8 @@ module Database.RocksDB.Base
     , write
     , get
     , getCF
+    , multiGet
+    , multiGetCF
     , withSnapshot
     , createSnapshot
     , releaseSnapshot
@@ -62,6 +64,7 @@ import           Foreign.C.String
 import           Foreign.ForeignPtr
 import           Foreign.Marshal.Alloc
 import           Foreign.Marshal.Array
+import           Foreign.Marshal.Utils     (withMany)
 import           Foreign.Ptr
 import           Foreign.Storable
 import           System.Directory
@@ -94,7 +97,8 @@ data BatchOp = Put !ByteString !ByteString
 -- when the function exits.
 withDB :: FilePath -> Config -> (DB -> IO a) -> IO a
 withDB path config f =
-    withOptions config $ \opts_ptr ->
+    withBlockCache config $ \cache ->
+    withOptionsCache cache config $ \opts_ptr ->
     withReadOpts Nothing $ \read_opts ->
     withWriteOpts $ \write_opts ->
     bracket (create_db opts_ptr read_opts write_opts) destroy_db f
@@ -118,8 +122,9 @@ withDBCF :: FilePath
          -> (DB -> IO a)
          -> IO a
 withDBCF path config cf_cfgs f =
-    withOptions config $ \opts_ptr ->
-    withOptionsCF (map snd cf_cfgs) $ \cf_opts ->
+    withBlockCache config $ \cache ->
+    withOptionsCache cache config $ \opts_ptr ->
+    withOptionsCFCache cache (map snd cf_cfgs) $ \cf_opts ->
     withReadOpts Nothing $ \read_opts ->
     withWriteOpts $ \write_opts ->
     withStrings (map fst cf_cfgs) $ \cf_names ->
@@ -324,6 +329,56 @@ getCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf key =
                 vlen <- peek vlen_ptr
                 res <- BU.unsafePackMallocCStringLen (val_ptr, cSizeToInt vlen)
                 return $ Just res
+
+-- | Read the values of many keys in one call. RocksDB looks the keys up
+-- together, sharing the work of finding the files and blocks that hold
+-- them, which is faster than reading them one by one. The values are in the
+-- order of the keys.
+multiGet :: DB -> [ByteString] -> IO [Maybe ByteString]
+multiGet db = multiGetCommon db Nothing
+
+-- | 'multiGet' on a column family.
+multiGetCF :: DB -> ColumnFamily -> [ByteString] -> IO [Maybe ByteString]
+multiGetCF db cf = multiGetCommon db (Just cf)
+
+multiGetCommon :: DB -> Maybe ColumnFamily -> [ByteString] -> IO [Maybe ByteString]
+multiGetCommon _ _ [] = return []
+multiGetCommon DB{rocksDB = db_ptr, readOpts = read_opts} mcf keys =
+    withMany BU.unsafeUseAsCStringLen keys $ \kls ->
+    withArrayLen (map fst kls) $ \n key_ptrs ->
+    withArray (map (intToCSize . snd) kls) $ \key_lens ->
+    allocaArray n $ \val_ptrs ->
+    allocaArray n $ \val_lens ->
+    allocaArray n $ \err_ptrs -> do
+        case mcf of
+            Just cf ->
+                withArray (replicate n cf) $ \cfs ->
+                c_rocksdb_multi_get_cf
+                    db_ptr read_opts cfs (intToCSize n)
+                    key_ptrs key_lens val_ptrs val_lens err_ptrs
+            Nothing ->
+                c_rocksdb_multi_get
+                    db_ptr read_opts (intToCSize n)
+                    key_ptrs key_lens val_ptrs val_lens err_ptrs
+        vals <- peekArray n val_ptrs
+        lens <- peekArray n val_lens
+        errs <- peekArray n err_ptrs
+        -- Own every value and free every error before throwing, so that
+        -- none of them leaks.
+        res <- forM (zip vals lens) $ \(v, l) ->
+            if v == nullPtr
+                then return Nothing
+                else Just <$> BU.unsafePackMallocCStringLen (v, cSizeToInt l)
+        msgs <- forM errs $ \e ->
+            if e == nullPtr
+                then return Nothing
+                else do
+                    m <- peekCString e
+                    free e
+                    return (Just m)
+        case [m | Just m <- msgs] of
+            m : _ -> throwIO $ userError $ "multi_get: " ++ m
+            [] -> return res
 
 delete :: DB -> ByteString -> IO ()
 delete db = deleteCommon db Nothing

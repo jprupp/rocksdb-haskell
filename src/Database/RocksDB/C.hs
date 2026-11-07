@@ -21,6 +21,7 @@ module Database.RocksDB.C
     , Iterator
     , WriteBatch
     , FilterPolicy
+    , Cache
     , ErrPtr
     , DBName
     , CFName
@@ -82,6 +83,12 @@ module Database.RocksDB.C
     , c_rocksdb_block_based_options_create
     , c_rocksdb_block_based_options_set_filter_policy
     , c_rocksdb_block_based_options_destroy
+    , c_rocksdb_block_based_options_set_block_cache
+    , c_rocksdb_block_based_options_set_cache_index_and_filter_blocks
+    , c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority
+    , c_rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache
+    , c_rocksdb_cache_create_lru
+    , c_rocksdb_cache_destroy
     , c_rocksdb_slicetransform_create_fixed_prefix
     , c_rocksdb_slicetransform_destroy
     , c_rocksdb_filterpolicy_destroy
@@ -109,6 +116,7 @@ data LWriteBatch
 data LWriteOpts
 data LFilterPolicy
 data LSliceTransform
+data LCache
 
 type RocksDB            = Ptr LRocksDB
 type ColumnFamily       = Ptr LColumnFamily
@@ -121,6 +129,7 @@ type Snapshot           = Ptr LSnapshot
 type Iterator           = Ptr LIterator
 type FilterPolicy       = Ptr LFilterPolicy
 type BlockBasedOptions  = Ptr LBlockBasedOptions
+type Cache              = Ptr LCache
 
 type ErrPtr           = Ptr CString
 type DBName           = CString
@@ -412,10 +421,40 @@ foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_filter_po
                                                   -> FilterPolicy
                                                   -> IO ()
 
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_block_cache"
+  c_rocksdb_block_based_options_set_block_cache :: BlockBasedOptions
+                                                -> Cache
+                                                -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_cache_index_and_filter_blocks"
+  c_rocksdb_block_based_options_set_cache_index_and_filter_blocks :: BlockBasedOptions
+                                                                  -> CUChar
+                                                                  -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority"
+  c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority :: BlockBasedOptions
+                                                                                     -> CUChar
+                                                                                     -> IO ()
+
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache"
+  c_rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache :: BlockBasedOptions
+                                                                            -> CUChar
+                                                                            -> IO ()
+
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_block_based_table_factory"
   c_rocksdb_options_set_block_based_table_factory :: Options
                                                   -> BlockBasedOptions
                                                   -> IO ()
+
+--
+-- Block Cache
+--
+
+foreign import ccall safe "rocksdb/c.h rocksdb_cache_create_lru"
+  c_rocksdb_cache_create_lru :: CSize -> IO Cache
+
+foreign import ccall safe "rocksdb/c.h rocksdb_cache_destroy"
+  c_rocksdb_cache_destroy :: Cache -> IO ()
 
 --
 -- Prefix Extractor
