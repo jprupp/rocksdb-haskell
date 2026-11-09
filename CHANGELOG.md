@@ -1,3 +1,34 @@
+## 2.6.2
+
+ * Build the Bloom filters that `bloomFilter` asks for. The bits per key were
+   passed to `rocksdb_filterpolicy_create_bloom_full` as an integer, which is
+   what RocksDB took until 6.23; since 6.24 the function takes a `double`. An
+   integer and a `double` travel in different registers, so RocksDB read
+   something else as the bits per key and built no filters: table files had
+   `filter block size=0`, and a lookup of an absent key read a data block in
+   every file that could hold it. Nothing failed, and no test noticed. In a
+   measurement with 2,600,000 keys, such a lookup took about 5.5 microseconds
+   without the filters and 1.5 with them.
+
+   The function is now imported with the `capi` calling convention, through a
+   stub compiled against `rocksdb/c.h`, so the C compiler passes the argument
+   as the installed RocksDB declares it, before or after 6.24. The headers
+   were already needed to install RocksDB for development; they are now
+   needed to build this package too.
+
+   Databases opened with `bloomFilter` start building filters when they are
+   opened with this version: for the table files written from then on, at
+   about 1.25 bytes per key. Files written before have none until compaction
+   rewrites them.
+ * Pass the error pointer that `rocksdb_approximate_sizes` takes since RocksDB
+   6.16. `approximateSize` called it with one argument too few, leaving RocksDB
+   to read a pointer that was never passed, and to write an error message
+   through it if the call failed. It now throws an `IOError` on failure.
+ * Both were found by comparing every foreign import with the `rocksdb/c.h` of
+   RocksDB 11.1: the other 70 match.
+ * Tests that table files have filters when asked for and not otherwise, and
+   of `approximateSize`, which had none.
+
 ## 2.6.1
 
  * Documentation, lots of it, with detailed explanations.
