@@ -264,6 +264,44 @@ main = do
             getCF db two (key 20000) `shouldReturn` Just value
             files <- getProperty db SSTables
             files `shouldSatisfy` maybe False (not . C.null)
+    describe "Bloom filters" $ do
+      it "are built for a family that asks for one, and only for it" $ \_ ->
+        withSystemTempDirectory "rocksdb-tests-bloom" $ \path -> do
+          let open = def {createIfMissing = True, createMissingColumnFamilies = True}
+              families = [("with", def {bloomFilter = True}), ("without", def)]
+              key :: Int -> C.ByteString
+              key i = C.pack (printf "k%07d" i)
+              -- bytes of filter blocks in the table files of a family
+              filters d cf =
+                getPropertyCF d cf (PropertyName "rocksdb.aggregated-table-properties")
+                  >>= maybe (fail "no table properties") (return . tableProperty "filter block size")
+              both d = case columnFamilies d of
+                [a, b] -> return (a, b)
+                _ -> fail "expected two column families"
+          withDBCF path open families $ \db -> do
+            (with, without) <- both db
+            forM_ [1 .. 5000] $ \i -> putCF db with (key i) "value" >> putCF db without (key i) "value"
+          -- opening the database again moves what was written from the
+          -- write-ahead log to table files, which is where filters are
+          withDBCF path open families $ \db -> do
+            (with, without) <- both db
+            -- ten bits for each of the 5000 keys is 6250 bytes
+            filters db with >>= (`shouldSatisfy` maybe False (> 5000))
+            filters db without `shouldReturn` Just 0
+            getCF db with (key 2500) `shouldReturn` Just "value"
+            getCF db with "absent" `shouldReturn` Nothing
+    describe "Approximate sizes" $ do
+      it "estimates the space used by a range of keys" $ \_ ->
+        withSystemTempDirectory "rocksdb-tests-sizes" $ \path -> do
+          let open = def {createIfMissing = True}
+              key :: Int -> C.ByteString
+              key i = C.pack (printf "k%07d" i)
+          withDB path open $ \db ->
+            forM_ [1 .. 5000] $ \i -> put db (key i) (C.pack (printf "%0100d" i))
+          -- sizes are those of table files; see the test of Bloom filters
+          withDB path open $ \db -> do
+            approximateSize db (key 1, key 5000) >>= (`shouldSatisfy` (> 0))
+            approximateSize db ("x", "y") `shouldReturn` 0
     describe "Properties" $ do
       it "reports memory use, per database and per column family" $ \db -> do
         let one = head (columnFamilies db)
@@ -321,3 +359,15 @@ main = do
             let two = columnFamilies db !! 1
             putCF db two "new" "cf"
             getCF db two "new" `shouldReturn` Just "cf"
+
+-- | A number in the text of the @rocksdb.aggregated-table-properties@
+-- property, which reads @name=value; name=value; ...@.
+tableProperty :: C.ByteString -> C.ByteString -> Maybe Int
+tableProperty name text =
+  listToMaybe
+    [ n
+    | field <- C.split ';' text,
+      let (k, v) = C.break (== '=') (C.dropWhile (== ' ') field),
+      k == name,
+      Just (n, _) <- [C.readInt (C.drop 1 v)]
+    ]

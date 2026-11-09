@@ -96,7 +96,8 @@ data Config = Config { createIfMissing :: !Bool
                        -- bloom filters and prefix seeks
                      , bloomFilter     :: !Bool
                        -- ^ use a full bloom filter with 10 bits per key to
-                       -- skip files that cannot contain a key
+                       -- skip files that cannot contain a key; the filters
+                       -- take about 1.25 bytes of memory per key
                      , writeBufferSize :: !(Maybe Int)
                        -- ^ bytes per memtable (RocksDB default 64 MiB);
                        -- per column family

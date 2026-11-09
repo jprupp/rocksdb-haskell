@@ -1,3 +1,4 @@
+{-# LANGUAGE CApiFFI                  #-}
 {-# LANGUAGE CPP                      #-}
 {-# LANGUAGE EmptyDataDecls           #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
@@ -21,6 +22,21 @@
 -- for example when they wait for disk or for a compaction to make room, and a
 -- @safe@ call lets other Haskell threads keep running meanwhile. The small
 -- extra cost per call is worth that in a concurrent program.
+--
+-- = Keeping the types in step with the header
+--
+-- The compiler does not check a foreign import against @rocksdb\/c.h@: it
+-- takes the Haskell type on trust. An argument of the wrong kind, or a
+-- missing one, compiles, links and runs, and RocksDB then works with garbage
+-- in its place. RocksDB has changed the types of functions that already
+-- existed, twice among the ones bound here: the error pointer added to
+-- @rocksdb_approximate_sizes@ in 6.16, and the bits per key of the Bloom
+-- filter policies, an @int@ until 6.24 and a @double@ since. When adding or
+-- reviewing a binding, read its prototype in the header, argument by
+-- argument. Where a type differs between versions of RocksDB, import the
+-- function with @capi@ instead of @ccall@, as
+-- 'c_rocksdb_filterpolicy_create_bloom_full' is: the C compiler then reads
+-- the header that is installed, and converts the argument.
 
 module Database.RocksDB.C
     ( RocksDB
@@ -327,6 +343,11 @@ foreign import ccall safe "rocksdb/c.h rocksdb_property_value_cf"
   c_rocksdb_property_value_cf :: RocksDB -> ColumnFamily -> CString -> IO CString
 
 -- | Binding to @rocksdb_approximate_sizes@.
+--
+-- The last argument receives an error, as in every function that can fail.
+-- RocksDB added it in 6.16. A binding without it leaves the C function to
+-- read a pointer that was never passed, and to write through it on failure.
+-- Older versions do not take the argument, and ignore it.
 foreign import ccall safe "rocksdb/c.h rocksdb_approximate_sizes"
   c_rocksdb_approximate_sizes :: RocksDB
                               -> CInt
@@ -337,6 +358,7 @@ foreign import ccall safe "rocksdb/c.h rocksdb_approximate_sizes"
                                  -- ^ range limit keys (array)
                               -> Ptr Word64
                                  -- ^ array of approx. sizes of ranges
+                              -> ErrPtr
                               -> IO ()
 
 -- | Binding to @rocksdb_destroy_db@.
@@ -582,8 +604,19 @@ foreign import ccall safe "rocksdb/c.h rocksdb_filterpolicy_destroy"
   c_rocksdb_filterpolicy_destroy :: FilterPolicy -> IO ()
 
 -- | Binding to @rocksdb_filterpolicy_create_bloom_full@.
-foreign import ccall safe "rocksdb/c.h rocksdb_filterpolicy_create_bloom_full"
-  c_rocksdb_filterpolicy_create_bloom_full :: CInt -> IO FilterPolicy
+--
+-- The bits per key are a @double@ in C since RocksDB 6.24, and were an @int@
+-- before. Passed as the wrong one of the two, they travel in the wrong
+-- register: the function reads whatever the other register holds, takes it
+-- for the bits per key, and with too few of them builds no filter at all.
+-- Nothing fails; lookups of absent keys are just as slow as without a filter.
+--
+-- So this import alone uses the @capi@ calling convention. GHC then calls the
+-- function through a stub that it compiles against @rocksdb\/c.h@, and the C
+-- compiler converts the argument to the type that the installed RocksDB
+-- declares, whichever it is.
+foreign import capi safe "rocksdb/c.h rocksdb_filterpolicy_create_bloom_full"
+  c_rocksdb_filterpolicy_create_bloom_full :: CDouble -> IO FilterPolicy
 
 --
 -- Read options

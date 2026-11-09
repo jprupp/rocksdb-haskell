@@ -337,7 +337,7 @@ type Range  = (ByteString, ByteString)
 
 -- | Approximate number of bytes of file system space used by the keys in a
 -- 'Range' of the default column family. Data still in memtables may not be
--- counted.
+-- counted. Throws an 'IOError' on failure.
 approximateSize :: DB -> Range -> IO Int64
 approximateSize DB{rocksDB = db_ptr} (from, to) =
     BU.unsafeUseAsCStringLen from $ \(from_ptr, flen) ->
@@ -346,15 +346,13 @@ approximateSize DB{rocksDB = db_ptr} (from, to) =
     withArray [intToCSize flen]   $ \flen_ptrs        ->
     withArray [to_ptr]            $ \to_ptrs          ->
     withArray [intToCSize tlen]   $ \tlen_ptrs        ->
-    allocaArray 1                 $ \size_ptrs        -> do
-        c_rocksdb_approximate_sizes db_ptr 1
-                                    from_ptrs flen_ptrs
-                                    to_ptrs tlen_ptrs
-                                    size_ptrs
-        fmap head $ peekArray 1 size_ptrs >>= mapM toInt64
-
-    where
-        toInt64 = return . fromIntegral
+    alloca                        $ \size_ptr         -> do
+        throwIfErr "approximate_sizes" $
+            c_rocksdb_approximate_sizes db_ptr 1
+                                        from_ptrs flen_ptrs
+                                        to_ptrs tlen_ptrs
+                                        size_ptr
+        fromIntegral <$> peek size_ptr
 
 -- | Write a key/value pair to the default column family, replacing any
 -- previous value. Throws an 'IOError' on failure.

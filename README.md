@@ -120,6 +120,10 @@ The library links against `-lrocksdb`. If RocksDB is installed in a
 non-standard place, pass its directories with `--extra-include-dirs` and
 `--extra-lib-dirs` (Cabal or Stack).
 
+The headers are needed to build, not only the library: the binding of the
+Bloom filter policy is compiled against `rocksdb/c.h`, because RocksDB changed
+the type of its argument in 6.24 and the header says which one is installed.
+
 ### Check the library is found
 
 ```sh
@@ -171,7 +175,7 @@ it, or has an older version, add it to `stack.yaml`:
 
 ```yaml
 extra-deps:
-  - rocksdb-haskell-jprupp-2.6.1
+  - rocksdb-haskell-jprupp-2.6.2
 ```
 
 With `stack --nix`, add RocksDB to the Nix packages:
@@ -437,7 +441,11 @@ A reasonable starting point for a large database is a block cache of a few
 hundred megabytes to a few gigabytes, `cacheIndexAndFilterBlocks = True`,
 `maxFiles` of a few thousand, and `dbWriteBufferSize` of a few hundred
 megabytes. Enable `bloomFilter` when most reads are point lookups of keys that
-may not exist.
+may not exist. A filter takes about 1.25 bytes per key, held with the index
+blocks: in the block cache with `cacheIndexAndFilterBlocks`, in memory outside
+it otherwise. A filter belongs to a table file and is written with it, so
+turning `bloomFilter` on for an existing database only covers the files
+written from then on; the others get a filter when compaction rewrites them.
 
 For a large database, setting `maxFiles`, `blockCacheSize`,
 `cacheIndexAndFilterBlocks` and `dbWriteBufferSize` puts a ceiling on the memory
@@ -472,6 +480,16 @@ are hidden modules.
   reached the end. Check `iterGetError`.
 - Calls into RocksDB are `safe` foreign calls, so they do not block other
   Haskell threads, but each one costs a little more than an `unsafe` call.
+- Releases before 2.6.2 built no Bloom filters on RocksDB 6.24 or later,
+  whatever `bloomFilter` said: they passed the bits per key as an integer to a
+  function that had come to take a `double`. A database written by one of them
+  has no filters in its table files. After upgrading, files get them as they
+  are written, and the memory the filters need comes with them. The size of
+  the filters of a column family is in the `rocksdb.aggregated-table-properties`
+  property, as `filter block size`.
+- The compiler does not check a foreign import against RocksDB's header. A
+  binding with the wrong type builds and runs, with garbage in place of the
+  argument; the two fixed in 2.6.2 went unnoticed for years.
 
 ## Development
 
@@ -512,6 +530,10 @@ Pull requests are welcome.
 
 - Format new code with fourmolu, which the Nix shell provides.
 - Add tests for the behaviour you change.
+- When you add or change a binding in `Database.RocksDB.C`, read the
+  prototype in `rocksdb/c.h` argument by argument: nothing else checks the
+  Haskell type against it. If the type of an argument differs between
+  versions of RocksDB, import the function with `capi`.
 - Describe the change in `CHANGELOG.md`. Versions follow the
   [Haskell Package Versioning Policy](https://pvp.haskell.org/).
 
