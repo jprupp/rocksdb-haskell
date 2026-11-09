@@ -26,11 +26,7 @@ jobs:
       # Only this repository is checked out, so extra-deps that point at
       # sibling checkouts (such as ../haskoin-core) cannot build here.
       - name: Reject local path dependencies
-        run: |
-          if grep -nE '^[[:space:]]*-[[:space:]]*(\.\.?/|/|~)' stack.yaml; then
-            echo "::error file=stack.yaml::stack.yaml refers to local paths outside the repository. Pin released versions (or a git commit) in extra-deps before pushing."
-            exit 1
-          fi
+        run: scripts/reject-local-path-deps.sh
 
       - name: Install system libraries
         run: |
@@ -66,11 +62,7 @@ jobs:
       # Only this repository is checked out, so extra-deps that point at
       # sibling checkouts (such as ../haskoin-core) cannot build here.
       - name: Reject local path dependencies
-        run: |
-          if grep -nE '^[[:space:]]*-[[:space:]]*(\.\.?/|/|~)' stack.yaml; then
-            echo "::error file=stack.yaml::stack.yaml refers to local paths outside the repository. Pin released versions (or a git commit) in extra-deps before pushing."
-            exit 1
-          fi
+        run: scripts/reject-local-path-deps.sh
 
       # Stack runs the build inside nix-shell, which takes GHC and the
       # libraries from <nixpkgs>; nix_path points that at nixos-unstable.
@@ -106,7 +98,10 @@ jobs:
           path: |
             ~/.stack
             .stack-work
-          key: stack-nix-${{ runner.os }}-${{ steps.nixpkgs.outputs.version }}-${{ hashFiles('stack.yaml', 'stack.yaml.lock', '**/package.yaml') }}
+          # One key on two lines: in a double-quoted YAML scalar, a backslash
+          # at the end of a line joins it to the next with nothing in between.
+          key: "stack-nix-${{ runner.os }}-${{ steps.nixpkgs.outputs.version }}-\
+            ${{ hashFiles('stack.yaml', 'stack.yaml.lock', '**/package.yaml') }}"
           restore-keys: stack-nix-${{ runner.os }}-${{ steps.nixpkgs.outputs.version }}-
 
       - name: Build, test and build the documentation

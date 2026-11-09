@@ -56,7 +56,10 @@ main = do
           `shouldReturn` [Just "one50", Nothing, Just "one1", Just "one100", Nothing, Just "one50"]
         multiGet db [] `shouldReturn` []
         ks <- forM [1 .. 2000 :: Int] $ \i -> return (C.pack (show (i `mod` 150)))
-        multiGet db ks >>= (`shouldBe` map (\k -> if read (C.unpack k) `elem` [1 .. 100 :: Int] then Just ("v" <> k) else Nothing) ks)
+        let expected k
+              | read (C.unpack k) `elem` [1 .. 100 :: Int] = Just ("v" <> k)
+              | otherwise = Nothing
+        multiGet db ks `shouldReturn` map expected ks
     describe "Multithreading" $ do
       it "stores and retrieve items from multiple threads" $ \db -> do
         let key i = C.pack $ printf "key_%04d" i

@@ -554,7 +554,8 @@ foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_cache_ind
                                                                   -> IO ()
 
 -- | Binding to @rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority@.
-foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority"
+foreign import ccall safe
+  "rocksdb/c.h rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority"
   c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority :: BlockBasedOptions
                                                                                      -> CUChar
                                                                                      -> IO ()

@@ -1,7 +1,12 @@
 # rocksdb-haskell-jprupp
 
-[![Hackage](https://img.shields.io/hackage/v/rocksdb-haskell-jprupp.svg)](https://hackage.haskell.org/package/rocksdb-haskell-jprupp)
-[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](https://github.com/jprupp/rocksdb-haskell/blob/master/LICENSE)
+[![Hackage][hackage-badge]][hackage]
+[![License: BSD-3-Clause][license-badge]][license]
+
+[hackage]: https://hackage.haskell.org/package/rocksdb-haskell-jprupp
+[hackage-badge]: https://img.shields.io/hackage/v/rocksdb-haskell-jprupp.svg
+[license]: https://github.com/jprupp/rocksdb-haskell/blob/master/LICENSE
+[license-badge]: https://img.shields.io/badge/license-BSD--3--Clause-blue.svg
 
 Haskell bindings to [RocksDB](https://rocksdb.org), the embedded persistent
 key-value store. The package on Hackage is `rocksdb-haskell-jprupp`; the module
@@ -84,7 +89,8 @@ maintained as `rocksdb-haskell-jprupp`.
 | Column families| Open a database with several independent key spaces; add new ones on open     |
 | Snapshots      | Consistent point-in-time reads across many queries and iterators               |
 | Iterators      | Ordered scans, forwards and backwards, optionally pinned to a snapshot         |
-| Tuning         | Bloom filters, fixed-length prefix extractor, shared LRU block cache, memtable and WAL limits, open file limit |
+| Tuning         | Bloom filters, fixed-length prefix extractor, shared LRU block cache           |
+| Limits         | Memtable and WAL size limits, open file limit                                  |
 | Administration | Properties (memory use, statistics, SST files), approximate sizes, destroy, repair |
 
 ### What is not included
@@ -462,7 +468,9 @@ every open file and every memtable can grow without bound.
 | Opening                  | `withDB`, `withDBCF`                                           |
 | Reading and writing      | `get`, `getCF`, `multiGet`, `multiGetCF`, `put`, `putCF`, `delete`, `deleteCF`, `write` |
 | Snapshots                | `withSnapshot`, `createSnapshot`, `releaseSnapshot`            |
-| Iteration                | `withIter`, `withIterCF`, `withIterSnap`, `withIterSnapCF`, `iterSeek`, `iterFirst`, `iterLast`, `iterNext`, `iterPrev`, `iterKey`, `iterValue`, `iterEntry`, `iterValid`, `iterGetError` |
+| Creating iterators       | `withIter`, `withIterCF`, `withIterSnap`, `withIterSnapCF`     |
+| Moving iterators         | `iterSeek`, `iterFirst`, `iterLast`, `iterNext`, `iterPrev`    |
+| Reading from iterators   | `iterKey`, `iterValue`, `iterEntry`, `iterValid`, `iterGetError` |
 | Administration           | `getProperty`, `getPropertyCF`, `approximateSize`, `destroy`, `repair` |
 
 The FFI bindings (`Database.RocksDB.C`) and helpers (`Database.RocksDB.Internal`)
