@@ -1,8 +1,11 @@
 # rocksdb-haskell-jprupp
 
 [![Hackage][hackage-badge]][hackage]
+[![CI][ci-badge]][ci]
 [![License: BSD-3-Clause][license-badge]][license]
 
+[ci]: https://github.com/jprupp/rocksdb-haskell/actions/workflows/ci.yml
+[ci-badge]: https://github.com/jprupp/rocksdb-haskell/actions/workflows/ci.yml/badge.svg?branch=master
 [hackage]: https://hackage.haskell.org/package/rocksdb-haskell-jprupp
 [hackage-badge]: https://img.shields.io/hackage/v/rocksdb-haskell-jprupp.svg
 [license]: https://github.com/jprupp/rocksdb-haskell/blob/master/LICENSE
@@ -181,7 +184,7 @@ it, or has an older version, add it to `stack.yaml`:
 
 ```yaml
 extra-deps:
-  - rocksdb-haskell-jprupp-2.6.2
+  - rocksdb-haskell-jprupp-2.6.3
 ```
 
 With `stack --nix`, add RocksDB to the Nix packages:
@@ -530,7 +533,22 @@ and hoogle.
 generates.
 
 The tests are in `test/Spec.hs` and use [hspec](https://hspec.github.io/) and
-QuickCheck. Each test runs against a fresh database in a temporary directory.
+QuickCheck. Each test runs against a fresh database in a temporary directory,
+so they need RocksDB installed and nothing else. There are two kinds:
+
+- **Examples** pin down one behaviour each: what a function returns, when it
+  throws, what a setting changes in the files RocksDB writes. A test of a
+  setting checks an effect that can be observed, such as the size of the
+  filter blocks, because a wrong binding can do nothing without failing.
+- **Properties** apply random writes to the database and to a `Map`, and
+  require that every way of reading the database agrees with the map: point
+  reads, `multiGet`, iteration in both directions, seeks, snapshots and
+  column families. The keys are short and drawn from the bytes a binding is
+  most likely to mishandle, zero and 255, so that operations often meet on
+  the same key.
+
+`destroy` and `repair` have no tests: they take the `Options` of the C API,
+which this package gives no way to create.
 
 ### Contributing
 

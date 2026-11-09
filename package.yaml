@@ -1,5 +1,5 @@
 name: rocksdb-haskell-jprupp
-version: 2.6.2
+version: 2.6.3
 synopsis: Haskell bindings for RocksDB
 description: See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 maintainer: JP Rupp <jprupp@protonmail.ch>
@@ -40,3 +40,4 @@ tests:
       - QuickCheck
       - temporary
       - async
+      - containers

@@ -87,8 +87,9 @@ import Foreign.C.Types (CSize)
 -- | Create 'Iterator' and use it.
 --
 -- Note that an 'Iterator' creates a snapshot of the database implicitly, so
--- updates written after the iterator was created are not visible. You may,
--- however, specify an older 'Snapshot' in the 'ReadOptions'.
+-- updates written after the iterator was created are not visible. To read
+-- from an older 'Snapshot' instead, create the iterator from the t'DB' that
+-- 'Database.RocksDB.withSnapshot' provides: its 'readOpts' carry the snapshot.
 --
 -- Iterator should not be used after computation ends.
 withIter :: DB -> (Iterator -> IO a) -> IO a
@@ -155,10 +156,10 @@ withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
             Nothing -> c_rocksdb_create_iterator rocks_db ro
 
 -- | Manually create unmanaged iterator, over the default column family or over
--- a column family if one is given. It uses the 'readOpts' of the 'DB', so if
--- the 'DB' comes from 'Database.RocksDB.withSnapshot' it reads from that
+-- a column family if one is given. It uses the 'readOpts' of the t'DB', so if
+-- the t'DB' comes from 'Database.RocksDB.withSnapshot' it reads from that
 -- snapshot. It must be released with 'destroyIterator', and must not outlive
--- the 'DB'.
+-- the t'DB'.
 createIterator :: DB -> Maybe ColumnFamily -> IO Iterator
 createIterator DB{rocksDB = rocks_db, readOpts = read_opts} mcf =
     throwErrnoIfNull "create_iterator" $ case mcf of

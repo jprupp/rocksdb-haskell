@@ -17,7 +17,7 @@
 -- and 'createIterator' exist for cases where the lifetime of a resource cannot
 -- be expressed as a scope.
 --
--- A 'DB' handle is safe to use from many threads at once.
+-- A t'DB' handle is safe to use from many threads at once.
 
 module Database.RocksDB.Base
     ( -- * Exported Types
@@ -58,7 +58,7 @@ module Database.RocksDB.Base
     ) where
 
 import           Control.Exception
-import           Control.Monad             (forM, when, (>=>))
+import           Control.Monad             (forM, when)
 import           Data.ByteString           (ByteString)
 import qualified Data.ByteString           as BS
 import           Data.ByteString.Internal  (ByteString (..))
@@ -125,7 +125,7 @@ data BatchOp = Put !ByteString !ByteString
 -- families must be opened with 'withDBCF'.
 --
 -- Opening is expensive and a database can only be opened by one process at a
--- time, so open it once at program start and share the 'DB' between threads for
+-- time, so open it once at program start and share the t'DB' between threads for
 -- the life of the program.
 withDB :: FilePath -> Config -> (DB -> IO a) -> IO a
 withDB path config f =
@@ -152,12 +152,12 @@ withDB path config f =
 --
 -- The second argument configures the database and its default column family.
 -- The third argument lists the other column families by name, each with its own
--- 'Config'. Their handles are stored in 'columnFamilies', in the same order.
+-- t'Config'. Their handles are stored in 'columnFamilies', in the same order.
 --
 -- If the database directory is empty, a new database is created along with all
 -- the listed column families. Otherwise the existing database is opened with
 -- those column families; if some of them do not exist yet, the open fails unless
--- 'createMissingColumnFamilies' is set in the database 'Config'. RocksDB also
+-- 'createMissingColumnFamilies' is set in the database t'Config'. RocksDB also
 -- requires every column family that exists in the database to be listed.
 --
 -- The handle and all column family handles are released when the function
@@ -247,9 +247,9 @@ withDBCF path config cf_cfgs f =
                               }
 
 -- | Run an action with a snapshot of the database.
--- The 'DB' object is not valid after the action ends.
+-- The t'DB' object is not valid after the action ends.
 --
--- The 'DB' passed to the action reads from a consistent point-in-time view of
+-- The t'DB' passed to the action reads from a consistent point-in-time view of
 -- the database: 'get', 'multiGet' and iterators created from it do not see
 -- writes made after the snapshot was taken. Writes through it still go to the
 -- live database.
@@ -263,7 +263,7 @@ withSnapshot db f =
     bracket (createSnapshot db) releaseSnapshot (f . fst)
 
 -- | Manually create an unmanaged snapshot.
--- The returned 'DB' has 'readOpts' configured for the snapshot.
+-- The returned t'DB' has 'readOpts' configured for the snapshot.
 -- Use 'releaseSnapshot' to release both the snapshot and its read options.
 createSnapshot :: DB -> IO (DB, Snapshot)
 createSnapshot db@DB{rocksDB = db_ptr} = do

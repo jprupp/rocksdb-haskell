@@ -5,7 +5,7 @@ cabal-version: 1.12
 -- see: https://github.com/sol/hpack
 
 name:           rocksdb-haskell-jprupp
-version:        2.6.2
+version:        2.6.3
 synopsis:       Haskell bindings for RocksDB
 description:    See README at <https://github.com/jprupp/rocksdb-haskell#readme>
 category:       Database, FFI
@@ -58,6 +58,7 @@ test-suite spec
     , async
     , base >=4.9 && <5
     , bytestring
+    , containers
     , data-default
     , directory
     , hspec

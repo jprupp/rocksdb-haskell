@@ -42,7 +42,7 @@
 --   Serialization is a separate concern.
 --
 -- * __Memory you can bound.__ RocksDB keeps a lot of memory outside the Haskell
---   heap. 'Config' exposes the settings that put a ceiling on it, because an
+--   heap. t'Config' exposes the settings that put a ceiling on it, because an
 --   indexer that grows until the machine runs out of memory is not usable.
 --
 -- This is the only module that needs to be imported. It re-exports

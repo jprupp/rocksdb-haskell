@@ -1,3 +1,21 @@
+## 2.6.3
+
+ * Documentation only; the library behaves as in 2.6.2.
+ * References in the Haddock that named both a type and its constructor, such
+   as `DB` and `Config`, now say that they mean the type, and two that named
+   nothing in scope are fixed: the documentation builds without warnings about
+   ambiguous or unresolved identifiers.
+ * The documentation of `withIter` said to set a snapshot in the read options,
+   which the API has no way to do. It now says how: create the iterator from
+   the `DB` that `withSnapshot` provides.
+ * Remove an unused import.
+ * The test suite grows from 17 tests to 51. It now covers deletes, batches,
+   `withSnapshot`, iteration backwards, empty keys and values, binary data,
+   and the errors of opening a database, none of which had a test. Six of the
+   tests are QuickCheck properties that compare the database with a `Map`
+   after random writes. The suite also compiles without warnings.
+ * A badge in the README shows the state of CI on `master`.
+
 ## 2.6.2
 
  * Build the Bloom filters that `bloomFilter` asks for. The bits per key were

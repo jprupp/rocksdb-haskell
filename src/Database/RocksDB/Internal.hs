@@ -8,7 +8,7 @@
 -- Stability   : experimental
 -- Portability : non-portable
 --
--- Internal types and helpers shared by the other modules. The 'DB' and 'Config'
+-- Internal types and helpers shared by the other modules. The t'DB' and t'Config'
 -- types are re-exported by "Database.RocksDB"; everything else is an
 -- implementation detail.
 
@@ -86,8 +86,9 @@ data Config = Config { createIfMissing :: !Bool
                        -- ^ check data aggressively and stop early on any
                        -- corruption
                      , createMissingColumnFamilies :: !Bool
-                       -- ^ create the column families passed to 'withDBCF'
-                       -- that an existing database does not have yet
+                       -- ^ create the column families passed to
+                       -- 'Database.RocksDB.withDBCF' that an existing
+                       -- database does not have yet
                      , maxFiles        :: !(Maybe Int)
                        -- ^ maximum number of files RocksDB keeps open
                        -- ('Nothing': RocksDB default, unlimited)
@@ -140,7 +141,7 @@ instance Default Config where
                  , maxTotalWalSize  = Nothing
                  }
 
--- | Create RocksDB options from a 'Config' and pass them to a function. The
+-- | Create RocksDB options from a t'Config' and pass them to a function. The
 -- options are destroyed when it returns.
 withOptions :: Config -> (Options -> IO a) -> IO a
 withOptions = withOptionsCache Nothing
@@ -270,22 +271,22 @@ boolToCBool True  = 1
 boolToCBool False = 0
 {-# INLINE boolToCBool #-}
 
--- | Convert a 'CSize' to an 'Int'.
+-- | Convert a t'CSize' to an 'Int'.
 cSizeToInt :: CSize -> Int
 cSizeToInt = fromIntegral
 {-# INLINE cSizeToInt #-}
 
--- | Convert an 'Int' to a 'CSize'.
+-- | Convert an 'Int' to a t'CSize'.
 intToCSize :: Int -> CSize
 intToCSize = fromIntegral
 {-# INLINE intToCSize #-}
 
--- | Convert an 'Int' to a 'CInt'.
+-- | Convert an 'Int' to a t'CInt'.
 intToCInt :: Int -> CInt
 intToCInt = fromIntegral
 {-# INLINE intToCInt #-}
 
--- | Convert a 'CInt' to an 'Int'.
+-- | Convert a t'CInt' to an 'Int'.
 cIntToInt :: CInt -> Int
 cIntToInt = fromIntegral
 {-# INLINE cIntToInt #-}
