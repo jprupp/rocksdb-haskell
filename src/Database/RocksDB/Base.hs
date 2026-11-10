@@ -145,6 +145,7 @@ withDB path config f =
             return DB { rocksDB = db_ptr
                       , columnFamilies = []
                       , readOpts = read_opts
+                      , snapshot = Nothing
                       , writeOpts = write_opts
                       }
 
@@ -204,6 +205,7 @@ withDBCF path config cf_cfgs f =
             return DB { rocksDB = db_ptr
                       , columnFamilies = cfs
                       , readOpts = read_opts
+                      , snapshot = Nothing
                       , writeOpts = write_opts
                       }
     destroy_db db = do
@@ -243,6 +245,7 @@ withDBCF path config cf_cfgs f =
                     return DB { rocksDB = db_ptr
                               , columnFamilies = cfs
                               , readOpts = read_opts
+                              , snapshot = Nothing
                               , writeOpts = write_opts
                               }
 
@@ -269,7 +272,7 @@ createSnapshot :: DB -> IO (DB, Snapshot)
 createSnapshot db@DB{rocksDB = db_ptr} = do
     snap_ptr <- c_rocksdb_create_snapshot db_ptr
     read_opts <- createReadOpts (Just snap_ptr)
-    return (db{readOpts = read_opts}, snap_ptr)
+    return (db{readOpts = read_opts, snapshot = Just snap_ptr}, snap_ptr)
 
 -- | Function to release an unmanaged snapshot.
 -- Also releases the read options associated with the snapshot DB.

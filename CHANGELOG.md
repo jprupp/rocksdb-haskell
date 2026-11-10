@@ -1,3 +1,22 @@
+## 2.7.0
+
+ * Bounded iterators. `withIterConfig` creates an iterator that RocksDB itself
+   stops, as an `IterConfig` says: at a `lowerBound` or an `upperBound`, or at
+   the end of the prefix that it was sent to, with `prefixSameAsStart`. Until
+   now a scan of a range could only stop by reading the first key past it,
+   and when the keys past it had been deleted, RocksDB stepped over the marker
+   of every one to find that key. A scan of an empty range followed by 20,000
+   deleted keys took 2,600 microseconds; with an upper bound it takes 2.5.
+   `prefixUpperBound` gives the bound that ends a prefix, and
+   `createIteratorConfig` manages such an iterator by hand.
+ * `totalOrderSeek`, also in `IterConfig`, walks every key in order in a
+   database that has a `prefixLength`, where a plain iterator only promises
+   the keys of one prefix.
+ * The `DB` record has a new field, `snapshot`, with the snapshot that its
+   read options read from. Code that builds a `DB` by hand has to set it;
+   code that gets one from `withDB`, `withDBCF` or `withSnapshot` needs no
+   change. This is why the version is 2.7.0 and not 2.6.5.
+
 ## 2.6.4
 
  * Iterators read rows about three times faster. `iterValid`, `iterKey` and

@@ -124,6 +124,10 @@ module Database.RocksDB.C
     , c_rocksdb_readoptions_create
     , c_rocksdb_readoptions_destroy
     , c_rocksdb_readoptions_set_snapshot
+    , c_rocksdb_readoptions_set_iterate_upper_bound
+    , c_rocksdb_readoptions_set_iterate_lower_bound
+    , c_rocksdb_readoptions_set_prefix_same_as_start
+    , c_rocksdb_readoptions_set_total_order_seek
     , c_rocksdb_writeoptions_create
     , c_rocksdb_writeoptions_destroy
     , c_rocksdb_free
@@ -642,6 +646,27 @@ foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_destroy"
 -- | Binding to @rocksdb_readoptions_set_snapshot@.
 foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_snapshot"
   c_rocksdb_readoptions_set_snapshot :: ReadOpts -> Snapshot -> IO ()
+
+-- | Binding to @rocksdb_readoptions_set_iterate_upper_bound@.
+--
+-- RocksDB does not copy the key: the read options, and every iterator made
+-- from them, keep the pointer. The memory has to stay as it is until the last
+-- of those iterators is destroyed.
+foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_iterate_upper_bound"
+  c_rocksdb_readoptions_set_iterate_upper_bound :: ReadOpts -> Key -> CSize -> IO ()
+
+-- | Binding to @rocksdb_readoptions_set_iterate_lower_bound@. The key is not
+-- copied; see 'c_rocksdb_readoptions_set_iterate_upper_bound'.
+foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_iterate_lower_bound"
+  c_rocksdb_readoptions_set_iterate_lower_bound :: ReadOpts -> Key -> CSize -> IO ()
+
+-- | Binding to @rocksdb_readoptions_set_prefix_same_as_start@.
+foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_prefix_same_as_start"
+  c_rocksdb_readoptions_set_prefix_same_as_start :: ReadOpts -> CUChar -> IO ()
+
+-- | Binding to @rocksdb_readoptions_set_total_order_seek@.
+foreign import ccall safe "rocksdb/c.h rocksdb_readoptions_set_total_order_seek"
+  c_rocksdb_readoptions_set_total_order_seek :: ReadOpts -> CUChar -> IO ()
 
 
 --

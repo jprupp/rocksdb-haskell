@@ -36,6 +36,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Database.RocksDB
+import GHC.Clock (getMonotonicTime)
 import System.IO.Temp
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
@@ -47,6 +48,7 @@ main :: IO ()
 main = hspec $ do
   around (withTunedDB ["one", "two", "tree"]) tunedSpec
   around withPlainDB plainSpec
+  boundSpec
   openingSpec
   tuningSpec
   modifyMaxSuccess (const 50) modelSpec
@@ -135,6 +137,14 @@ backwards itr = do
   iterGetError itr `shouldReturn` Nothing
   return entries
 
+-- | The time that so many runs of an action take, in seconds.
+timed :: Int -> IO a -> IO Double
+timed n action = do
+  t0 <- getMonotonicTime
+  replicateM_ n action
+  t1 <- getMonotonicTime
+  return (t1 - t0)
+
 -- | Whether a property value is a number greater than zero.
 positive :: Maybe ByteString -> Bool
 positive = maybe False (maybe False ((> 0) . fst) . C.readInt)
@@ -154,6 +164,22 @@ tableProperty name text =
 -------------------------------------------------------------------------------
 -- Examples against a tuned database
 -------------------------------------------------------------------------------
+
+boundSpec :: Spec
+boundSpec = describe "The bound that ends a prefix" $ do
+  it "gives the bound that ends a prefix" $ do
+    prefixUpperBound "user:" `shouldBe` Just "user;"
+    prefixUpperBound "a\xff\xff" `shouldBe` Just "b"
+    prefixUpperBound "\xff\xff" `shouldBe` Nothing
+    prefixUpperBound "" `shouldBe` Nothing
+  prop "bounds exactly the keys with the prefix" $ \(ws, vs) ->
+    let prefix = BS.pack ws
+        rest = BS.pack vs
+        inside b k = (prefix `BS.isPrefixOf` k) == (k >= prefix && k < b)
+     in case prefixUpperBound prefix of
+          Nothing -> BS.all (== 0xff) prefix
+          -- a key that has the prefix, and one that most likely has not
+          Just b -> inside b (prefix <> rest) && inside b rest
 
 tunedSpec :: SpecWith DB
 tunedSpec = do
@@ -210,6 +236,39 @@ tunedSpec = do
         iterEntry itr `shouldReturn` Just ("bbb1", "vbbb1")
         iterNext itr
         iterEntry itr `shouldReturn` Just ("bbb2", "vbbb2")
+  describe "Iterators and prefixes" $ do
+    -- the prefix of this database is three bytes
+    let keys = ["aaa1", "aaa2", "bbb1", "bbb2", "ccc1"] :: [ByteString]
+        fill db = forM_ keys $ \k -> put db k k
+        from k itr = iterSeek itr k >> map fst <$> scan iterNext itr
+    it "stays within the prefix it was sent to" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {prefixSameAsStart = True} $ \itr -> do
+        from "bbb" itr `shouldReturn` ["bbb1", "bbb2"]
+        iterGetError itr `shouldReturn` Nothing
+        -- the same iterator, sent elsewhere, has its bound there
+        from "aaa2" itr `shouldReturn` ["aaa2"]
+        from "ccc" itr `shouldReturn` ["ccc1"]
+        from "abc" itr `shouldReturn` []
+    it "stays within the prefix when the data is in table files" $ \db -> do
+      fill db
+      -- enough writes to flush the keys out of memory, where the prefix
+      -- filters are
+      forM_ [0 .. 20000] $ \i -> put db ("zzz" <> key i) (BS.replicate 1000 0)
+      withIterConfig db Nothing def {prefixSameAsStart = True} $ \itr -> do
+        from "bbb" itr `shouldReturn` ["bbb1", "bbb2"]
+        from "abc" itr `shouldReturn` []
+    it "walks every prefix in order when asked for the total order" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {totalOrderSeek = True} $ \itr -> do
+        map fst <$> forwards itr `shouldReturn` keys
+        map fst <$> backwards itr `shouldReturn` reverse keys
+        from "abc" itr `shouldReturn` ["bbb1", "bbb2", "ccc1"]
+    it "takes an upper bound across prefixes with the total order" $ \db -> do
+      fill db
+      let cfg = def {totalOrderSeek = True, upperBound = Just "bbb2"}
+      withIterConfig db Nothing cfg (from "aaa2") `shouldReturn` ["aaa2", "bbb1"]
+
   describe "Properties" $ do
     it "reports memory use, per database and per column family" $ \db -> do
       one <- firstFamily db
@@ -366,6 +425,93 @@ plainSpec = do
       put db "a" "1"
       bracket (createIterator db Nothing) destroyIterator forwards
         `shouldReturn` [("a", "1")]
+  describe "Bounded iterators" $ do
+    let keys = ["a1", "a2", "b1", "b2", "c1", "c2"] :: [ByteString]
+        fill db = forM_ keys $ \k -> put db k k
+        from k itr = iterSeek itr k >> map fst <$> scan iterNext itr
+    it "stops below an upper bound, which is outside" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {upperBound = Just "b2"} $ \itr -> do
+        from "a2" itr `shouldReturn` ["a2", "b1"]
+        iterGetError itr `shouldReturn` Nothing
+        map fst <$> backwards itr `shouldReturn` ["b1", "a2", "a1"]
+        from "b2" itr `shouldReturn` []
+    it "stops at a lower bound, which is inside" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {lowerBound = Just "b1"} $ \itr -> do
+        map fst <$> backwards itr `shouldReturn` ["c2", "c1", "b2", "b1"]
+        map fst <$> forwards itr `shouldReturn` ["b1", "b2", "c1", "c2"]
+        from "a1" itr `shouldReturn` ["b1", "b2", "c1", "c2"]
+    it "keeps between two bounds" $ \db -> do
+      fill db
+      let cfg = def {lowerBound = Just "a2", upperBound = Just "c1"}
+      withIterConfig db Nothing cfg $ \itr -> do
+        map fst <$> forwards itr `shouldReturn` ["a2", "b1", "b2"]
+        map fst <$> backwards itr `shouldReturn` ["b2", "b1", "a2"]
+    it "scans a prefix with the bound that ends it" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {upperBound = prefixUpperBound "b"} $ \itr ->
+        from "b" itr `shouldReturn` ["b1", "b2"]
+    it "returns nothing below an empty upper bound" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {upperBound = Just ""} $ \itr ->
+        forwards itr `shouldReturn` []
+    it "is an ordinary iterator without bounds" $ \db -> do
+      fill db
+      withIterConfig db Nothing def $ \itr ->
+        map fst <$> forwards itr `shouldReturn` keys
+    it "keeps bounds with bytes that C takes for the end of a string" $ \db -> do
+      let ks = ["k\0a", "k\0b", "k\0c"]
+      forM_ ks $ \k -> put db k k
+      withIterConfig db Nothing def {upperBound = Just "k\0c"} $ \itr ->
+        map fst <$> forwards itr `shouldReturn` ["k\0a", "k\0b"]
+    it "stays within its column family" $ \db -> do
+      cf <- firstFamily db
+      fill db
+      putCF db cf "b3" "other"
+      withIterConfig db (Just cf) def {upperBound = Just "c"} $ \itr ->
+        forwards itr `shouldReturn` [("b3", "other")]
+    it "reads from the snapshot of its database" $ \db -> do
+      fill db
+      withSnapshot db $ \snap -> do
+        put db "b15" "late"
+        delete db "b2"
+        let cfg = def {upperBound = prefixUpperBound "b"}
+        withIterConfig snap Nothing cfg (from "b") `shouldReturn` ["b1", "b2"]
+        withIterConfig db Nothing cfg (from "b") `shouldReturn` ["b1", "b15"]
+    it "can be created and destroyed by hand" $ \db -> do
+      fill db
+      (itr, destroyIt) <- createIteratorConfig db Nothing def {upperBound = Just "b"}
+      from "a" itr `shouldReturn` ["a1", "a2"]
+      destroyIt
+    it "does not keep its bounds in memory that Haskell moves" $ \db -> do
+      forM_ [0 .. 999] $ \i -> put db (key i) "v"
+      -- the bound is built at run time, used by many iterators, and the
+      -- heap is churned between seeks
+      forM_ [1 .. 50 :: Int] $ \n ->
+        withIterConfig db Nothing def {upperBound = Just (key (n * 10))} $ \itr -> do
+          let junk = sum (map BS.length [key j | j <- [1 .. 20000]])
+          junk `shouldBe` 160000
+          iterSeek itr (key 0)
+          length <$> scan iterNext itr `shouldReturn` n * 10
+    it "does not step over deleted keys past its upper bound" $ \db -> do
+      -- keys of "b" that are all deleted, between two keys that live: an
+      -- unbounded scan of "a" reads every marker to find "c"
+      let dead = [C.pack (printf "b%06d" i) | i <- [1 .. 20000 :: Int]]
+      put db "a1" "v"
+      put db "c1" "v"
+      write db (map (\k -> Put k "v") dead)
+      write db (map Del dead)
+      let bounded = withIterConfig db Nothing def {upperBound = prefixUpperBound "a"} (from "a2")
+          unbounded = withIter db $ \itr -> iterSeek itr "a2" >> iterKey itr
+      bounded `shouldReturn` []
+      unbounded `shouldReturn` Just "c1"
+      slow <- timed 20 unbounded
+      fast <- timed 20 bounded
+      -- measured at 2,600 microseconds against 2.5; ten times leaves room
+      -- for a busy machine
+      (fast * 10 < slow) `shouldBe` True
+
   describe "Snapshots" $ do
     it "hides later writes and deletes from every kind of read" $ \db -> do
       other <- firstFamily db

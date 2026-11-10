@@ -40,6 +40,38 @@
 -- Designing keys so that the records you read together sort together is the
 -- most important performance decision in a RocksDB schema.
 --
+-- = Bounds
+--
+-- An 'Iterator' from 'withIter' has no end but that of the data. The scan
+-- above stops when it /reads/ a key that does not start with @user:@, so
+-- RocksDB has to produce that key first. Usually it is the next one and costs
+-- nothing. It is not when the keys after the range have been deleted: a
+-- deleted key stays in the database, as a marker, until compaction drops it,
+-- and an iterator steps over every marker on its way to the next key that is
+-- alive. A scan of an empty range that is followed by ten thousand deleted
+-- keys reads ten thousand markers to return nothing.
+--
+-- 'withIterConfig' creates an iterator that RocksDB itself stops:
+--
+-- * at an 'upperBound' or a 'lowerBound', which are keys;
+-- * at the end of the prefix that it was sent to, with 'prefixSameAsStart',
+--   in a database or column family that has a 'prefixLength'.
+--
+-- Such an iterator becomes invalid at its bound without looking past it. A
+-- bound also lets RocksDB leave out the table files that hold nothing inside
+-- it.
+--
+-- @
+-- -- the same scan, which ends where the keys of "user:" end
+-- usersFrom db =
+--     'withIterConfig' db Nothing def{'upperBound' = 'prefixUpperBound' "user:"} $ \\it -> do
+--         'iterSeek' it "user:"
+--         let go acc = 'iterEntry' it >>= \\case
+--                 Just kv -> 'iterNext' it >> go (kv : acc)
+--                 Nothing -> return (reverse acc)
+--         go []
+-- @
+--
 -- = Safety
 --
 -- The C API crashes the process if an invalid iterator is moved, and the bytes
@@ -53,9 +85,14 @@ module Database.RocksDB.Iterator
     withIterCF,
     withIterSnap,
     withIterSnapCF,
+    -- * Bounded iteration
+    IterConfig (..),
+    withIterConfig,
+    prefixUpperBound,
     -- * Manual iterator management
     createIterator,
     createIteratorSnap,
+    createIteratorConfig,
     destroyIterator,
     destroyReadOpts,
     -- * Iterator operations
@@ -72,11 +109,12 @@ module Database.RocksDB.Iterator
   )
 where
 
-import Control.Exception (bracket)
-import Control.Monad (when)
+import Control.Exception (bracket, mask_, onException)
+import Control.Monad (forM, forM_, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
 import Data.ByteString.Unsafe qualified as BU
+import Data.Default (Default (..))
 import Database.RocksDB.C
 import Database.RocksDB.Internal
 import Foreign
@@ -154,6 +192,141 @@ withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
         throwErrnoIfNull "create_iterator" $ case mcf of
             Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
             Nothing -> c_rocksdb_create_iterator rocks_db ro
+
+-- | Where an iterator stops, and what a seek promises. 'def' asks for
+-- nothing, which gives the iterator that 'withIter' creates; override the
+-- fields you need:
+--
+-- @
+-- def { 'upperBound' = 'prefixUpperBound' "user:" }
+-- @
+--
+-- The fields are the read options of RocksDB that concern iterators and that
+-- change what a scan costs or returns. They are a record of their own, and
+-- not arguments, so that more of them can be added without breaking callers.
+--
+-- Which one to use:
+--
+-- * 'upperBound' when each range gets an iterator of its own. It needs no
+--   configuration of the database and works with keys of any shape.
+-- * 'prefixSameAsStart' when one iterator is sent to many ranges, one seek
+--   after another: the bound moves with each seek. It needs a 'prefixLength',
+--   and the ranges have to be whole prefixes of that length.
+-- * 'totalOrderSeek' when a database with a 'prefixLength' has to be walked
+--   from end to end.
+data IterConfig = IterConfig
+    { lowerBound :: !(Maybe ByteString)
+      -- ^ the smallest key that the iterator can be at. Going backwards, it
+      -- becomes invalid instead of moving to a smaller key; a seek to a
+      -- smaller key lands on the first key at or after the bound.
+    , upperBound :: !(Maybe ByteString)
+      -- ^ a key that the iterator stays below: the bound itself is outside.
+      -- Going forwards, the iterator becomes invalid instead of reaching the
+      -- bound or a larger key, and 'iterLast' goes to the last key below it.
+      -- 'prefixUpperBound' gives the bound that ends a prefix.
+    , prefixSameAsStart :: !Bool
+      -- ^ stay within the prefix of the key that the iterator was last sent
+      -- to with 'iterSeek': the iterator becomes invalid instead of moving
+      -- to a key with another prefix. The prefix is the first
+      -- 'Database.RocksDB.prefixLength' bytes of a key. It has no effect in
+      -- a database or column family without a prefix length, nor together
+      -- with 'totalOrderSeek', nor after 'iterFirst' or 'iterLast', which
+      -- name no prefix.
+    , totalOrderSeek :: !Bool
+      -- ^ see every key in order, whatever its prefix, in a database or
+      -- column family that has a 'Database.RocksDB.prefixLength'. There, a
+      -- plain iterator is only sure to return the keys that share the prefix
+      -- of the key it was sent to; what it does once it moves past them, or
+      -- after 'iterFirst', is not defined. That is the price of the prefix
+      -- filters, which let a seek skip the files that have nothing for a
+      -- prefix. This option gives up the filters and gets the order back.
+    }
+    deriving (Eq, Show)
+
+-- | No bounds, and seeks as RocksDB does them by default.
+instance Default IterConfig where
+    def =
+        IterConfig
+            { lowerBound = Nothing
+            , upperBound = Nothing
+            , prefixSameAsStart = False
+            , totalOrderSeek = False
+            }
+
+-- | The smallest key that is greater than every key that starts with the
+-- given prefix: the 'upperBound' of a scan of the prefix.
+--
+-- It is the prefix with its last byte raised by one, after dropping the bytes
+-- @0xff@ at its end, which cannot be raised. An empty prefix, or one that is
+-- all @0xff@, has no key above its keys, and gives 'Nothing': the scan needs
+-- no bound, since it ends where the data ends.
+--
+-- >>> prefixUpperBound "user:"
+-- Just "user;"
+prefixUpperBound :: ByteString -> Maybe ByteString
+prefixUpperBound prefix =
+    case B.unsnoc (B.dropWhileEnd (== 0xff) prefix) of
+        Nothing -> Nothing
+        Just (start, byte) -> Just (B.snoc start (byte + 1))
+
+-- | Create an 'Iterator' that stops where an t'IterConfig' says, over the
+-- default column family or over a column family if one is given, and use it.
+--
+-- Like 'withIter', it reads from the snapshot of the t'DB' if it comes from
+-- 'Database.RocksDB.withSnapshot', and otherwise sees the database as it was
+-- when the iterator was created.
+--
+-- Use it instead of 'withIter' when the range to scan is known beforehand
+-- and what follows it may hold many deleted keys, as in a queue or in any
+-- index whose entries come and go: see the module header. For a range that
+-- is followed by live keys there is little to gain. Creating the iterator
+-- costs slightly more than with 'withIter', since it gets read options of
+-- its own and the bounds are copied.
+--
+-- Iterator should not be used after computation ends.
+withIterConfig :: DB -> Maybe ColumnFamily -> IterConfig -> (Iterator -> IO a) -> IO a
+withIterConfig db mcf cfg f =
+    bracket (createIteratorConfig db mcf cfg) snd (f . fst)
+
+-- | Manually create an unmanaged iterator like that of 'withIterConfig'.
+--
+-- It returns the iterator and the action that destroys it. Run the action
+-- once, when done with the iterator, and before the t'DB' is closed or its
+-- snapshot released. Do not use 'destroyIterator' on this iterator: RocksDB
+-- keeps pointers to the bounds for as long as the iterator lives, so they
+-- are in memory that only that action frees, along with the read options.
+--
+-- For automatic resource management, prefer 'withIterConfig'.
+createIteratorConfig :: DB -> Maybe ColumnFamily -> IterConfig -> IO (Iterator, IO ())
+createIteratorConfig db mcf cfg = mask_ $ do
+    ro <- c_rocksdb_readoptions_create
+    lower <- bound ro c_rocksdb_readoptions_set_iterate_lower_bound (lowerBound cfg)
+    upper <- bound ro c_rocksdb_readoptions_set_iterate_upper_bound (upperBound cfg)
+    let release = do
+            c_rocksdb_readoptions_destroy ro
+            mapM_ free lower
+            mapM_ free upper
+    it <- flip onException release $ do
+        forM_ (snapshot db) (c_rocksdb_readoptions_set_snapshot ro)
+        when (prefixSameAsStart cfg) $ c_rocksdb_readoptions_set_prefix_same_as_start ro 1
+        when (totalOrderSeek cfg) $ c_rocksdb_readoptions_set_total_order_seek ro 1
+        createIteratorWithOpts db ro mcf
+    return (it, c_rocksdb_iter_destroy it >> release)
+  where
+    -- A copy of the bound outside the Haskell heap, where it does not move
+    -- and lives until it is freed. One byte is asked for at least, so that
+    -- an empty bound has a pointer too.
+    bound ::
+        ReadOpts ->
+        (ReadOpts -> CString -> CSize -> IO ()) ->
+        Maybe ByteString ->
+        IO (Maybe CString)
+    bound ro set mkey = forM mkey $ \key -> do
+        let len = B.length key
+        ptr <- mallocBytes (max 1 len)
+        BU.unsafeUseAsCString key $ \src -> copyBytes ptr src len
+        set ro ptr (intToCSize len)
+        return ptr
 
 -- | Manually create unmanaged iterator, over the default column family or over
 -- a column family if one is given. It uses the 'readOpts' of the t'DB', so if

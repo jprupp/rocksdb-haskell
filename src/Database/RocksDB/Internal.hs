@@ -58,6 +58,11 @@ data DB = DB { rocksDB        :: !RocksDB
              , readOpts       :: !ReadOpts
                -- ^ read options used by reads and iterators; set to read from
                -- a snapshot by 'Database.RocksDB.withSnapshot'
+             , snapshot       :: !(Maybe Snapshot)
+               -- ^ the snapshot that 'readOpts' read from, if any. RocksDB
+               -- cannot be asked what snapshot its read options hold, and
+               -- 'Database.RocksDB.withIterConfig' has to make read options
+               -- of its own that read from the same one.
              , writeOpts      :: !WriteOpts
                -- ^ write options used by all writes
              }

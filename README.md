@@ -92,6 +92,7 @@ maintained as `rocksdb-haskell-jprupp`.
 | Column families| Open a database with several independent key spaces; add new ones on open     |
 | Snapshots      | Consistent point-in-time reads across many queries and iterators               |
 | Iterators      | Ordered scans, forwards and backwards, optionally pinned to a snapshot         |
+| Bounds         | Iterators that stop at a key or at the end of a prefix, without reading past it |
 | Tuning         | Bloom filters, fixed-length prefix extractor, shared LRU block cache           |
 | Limits         | Memtable and WAL size limits, open file limit                                  |
 | Administration | Properties (memory use, statistics, SST files), approximate sizes, destroy, repair |
@@ -184,7 +185,7 @@ it, or has an older version, add it to `stack.yaml`:
 
 ```yaml
 extra-deps:
-  - rocksdb-haskell-jprupp-2.6.4
+  - rocksdb-haskell-jprupp-2.7.0
 ```
 
 With `stack --nix`, add RocksDB to the Nix packages:
@@ -398,6 +399,69 @@ withIter db $ \it -> do
 `createIterator`, `createIteratorSnap` and `destroyIterator` manage iterators
 by hand.
 
+### Bounded iterators
+
+The scan above stops when it reads a key that does not start with `user:`.
+RocksDB has to find that key first, and that can cost far more than the scan
+itself. A deleted key is not gone: it leaves a marker that stays until
+compaction drops it, and an iterator steps over every marker on its way to
+the next key that is alive. If the keys after `user:` were a queue that has
+been emptied, the scan reads the marker of every job that ever was in it.
+
+`withIterConfig` creates an iterator that RocksDB stops at a bound, without
+looking past it:
+
+```haskell
+-- every key that starts with "user:", and not one step further
+withIterConfig db Nothing def {upperBound = prefixUpperBound "user:"} $ \it -> do
+  iterSeek it "user:"
+  let go acc =
+        iterEntry it >>= \case
+          Just kv -> iterNext it >> go (kv : acc)
+          Nothing -> return (reverse acc)
+  go []
+```
+
+The second argument is the column family, or `Nothing` for the default one.
+The `IterConfig` has four fields, all off in `def`:
+
+| Field               | Type               | What it does                                                    |
+| ------------------- | ------------------ | --------------------------------------------------------------- |
+| `upperBound`        | `Maybe ByteString` | The iterator stays below this key; the key itself is outside     |
+| `lowerBound`        | `Maybe ByteString` | The iterator does not go below this key; the key itself is inside |
+| `prefixSameAsStart` | `Bool`             | The iterator stays within the prefix of the key it was sent to   |
+| `totalOrderSeek`    | `Bool`             | See every key in order, in a database that has a `prefixLength`  |
+
+Which one to use:
+
+- **`upperBound`**, with `prefixUpperBound`, when each range gets its own
+  iterator. It needs nothing from the configuration of the database, and the
+  range can be any.
+- **`prefixSameAsStart`** when one iterator is sent to many ranges, seek
+  after seek, which saves creating an iterator for each: the bound moves with
+  every `iterSeek`. It needs a `prefixLength` in the `Config`, and each range
+  has to be a whole prefix of that length. It also lets RocksDB use its
+  prefix filters to skip the files that have nothing for the prefix.
+- **`totalOrderSeek`** to walk a database that has a `prefixLength` from end
+  to end. Without it, an iterator there only promises the keys that share
+  the prefix of the key it was sent to.
+- **`withIter`** when what follows the range is alive, or when there is no
+  range. A bound costs a little when the iterator is created, and gains
+  nothing there.
+
+How much it matters, in this package's own test: one live key, then 20,000
+keys that were written and deleted, then another live key. A scan from just
+after the first one, which finds nothing, in microseconds:
+
+| Iterator                         | Time  |
+| -------------------------------- | ----- |
+| `withIter`                       | 2,600 |
+| `withIterConfig` with an `upperBound` | 2.5 |
+
+`createIteratorConfig` manages such an iterator by hand. It returns the
+iterator together with the action that destroys it, which also frees the
+bounds: RocksDB keeps pointers to them for as long as the iterator lives.
+
 ### Properties and maintenance
 
 ```haskell
@@ -472,6 +536,7 @@ every open file and every memtable can grow without bound.
 | Reading and writing      | `get`, `getCF`, `multiGet`, `multiGetCF`, `put`, `putCF`, `delete`, `deleteCF`, `write` |
 | Snapshots                | `withSnapshot`, `createSnapshot`, `releaseSnapshot`            |
 | Creating iterators       | `withIter`, `withIterCF`, `withIterSnap`, `withIterSnapCF`     |
+| Bounded iterators        | `IterConfig`, `withIterConfig`, `createIteratorConfig`, `prefixUpperBound` |
 | Moving iterators         | `iterSeek`, `iterFirst`, `iterLast`, `iterNext`, `iterPrev`    |
 | Reading from iterators   | `iterKey`, `iterValue`, `iterEntry`, `iterValid`, `iterGetError` |
 | Administration           | `getProperty`, `getPropertyCF`, `approximateSize`, `destroy`, `repair` |
@@ -489,6 +554,16 @@ are hidden modules.
   `iterFirst` or `iterLast`.
 - An iterator that becomes invalid because of corruption looks like one that
   reached the end. Check `iterGetError`.
+- A scan that stops by looking at the key it has reached steps over every
+  deleted key that follows its range. Where keys come and go, give the
+  iterator a bound with `withIterConfig`.
+- In a database with a `prefixLength`, an iterator that moves past the
+  prefix it was sent to, or that starts with `iterFirst` or `iterLast`, may
+  skip keys. Ask for `totalOrderSeek`, or stay within the prefix with
+  `prefixSameAsStart`.
+- Destroy an iterator from `createIteratorConfig` with the action that came
+  with it, not with `destroyIterator`, which would leave its bounds and read
+  options allocated.
 - Calls into RocksDB are `safe` foreign calls, so they do not block other
   Haskell threads, but each one costs a little more than an `unsafe` call.
 - Releases before 2.6.2 built no Bloom filters on RocksDB 6.24 or later,
