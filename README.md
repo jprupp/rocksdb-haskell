@@ -184,7 +184,7 @@ it, or has an older version, add it to `stack.yaml`:
 
 ```yaml
 extra-deps:
-  - rocksdb-haskell-jprupp-2.6.3
+  - rocksdb-haskell-jprupp-2.6.4
 ```
 
 With `stack --nix`, add RocksDB to the Nix packages:

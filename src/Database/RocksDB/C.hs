@@ -392,7 +392,15 @@ foreign import ccall safe "rocksdb/c.h rocksdb_iter_destroy"
   c_rocksdb_iter_destroy :: Iterator -> IO ()
 
 -- | Binding to @rocksdb_iter_valid@.
-foreign import ccall safe "rocksdb/c.h rocksdb_iter_valid"
+--
+-- An unsafe call, like 'c_rocksdb_iter_key' and 'c_rocksdb_iter_value': the
+-- three only read what the iterator already holds, and return at once. A
+-- safe call lets other Haskell threads run meanwhile, which costs about 0.4
+-- microseconds each time, and reading one row takes five of these calls.
+-- Walking 700,000 rows took 2.8 microseconds a row with safe calls and 0.8
+-- with unsafe ones. The calls that move the iterator stay safe, because
+-- they can read from disk.
+foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_valid"
   c_rocksdb_iter_valid :: Iterator -> IO CUChar
 
 -- | Binding to @rocksdb_iter_seek_to_first@.
@@ -415,12 +423,12 @@ foreign import ccall safe "rocksdb/c.h rocksdb_iter_next"
 foreign import ccall safe "rocksdb/c.h rocksdb_iter_prev"
   c_rocksdb_iter_prev :: Iterator -> IO ()
 
--- | Binding to @rocksdb_iter_key@.
-foreign import ccall safe "rocksdb/c.h rocksdb_iter_key"
+-- | Binding to @rocksdb_iter_key@. Unsafe; see 'c_rocksdb_iter_valid'.
+foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_key"
   c_rocksdb_iter_key :: Iterator -> Ptr CSize -> IO Key
 
--- | Binding to @rocksdb_iter_value@.
-foreign import ccall safe "rocksdb/c.h rocksdb_iter_value"
+-- | Binding to @rocksdb_iter_value@. Unsafe; see 'c_rocksdb_iter_valid'.
+foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_value"
   c_rocksdb_iter_value :: Iterator -> Ptr CSize -> IO Val
 
 -- | Binding to @rocksdb_iter_get_error@.
