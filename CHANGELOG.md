@@ -1,3 +1,15 @@
+## 2.7.1
+
+ * Documentation and tests only; the library behaves as in 2.7.0.
+ * The documentation of `prefixSameAsStart` was wrong on one point and silent
+   on another. It said that the option does nothing after `iterFirst` or
+   `iterLast`: it does, the iterator stays within the prefix of the key that
+   it finds there. And it did not say that every key, sought or stored, has
+   to be at least as long as the `prefixLength`: RocksDB takes the prefix of
+   a key without checking its length, and reads past the end of a shorter
+   one. Both are now in the Haddock and in the README, and the first has
+   tests.
+
 ## 2.7.0
 
  * Bounded iterators. `withIterConfig` creates an iterator that RocksDB itself

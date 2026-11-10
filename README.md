@@ -185,7 +185,7 @@ it, or has an older version, add it to `stack.yaml`:
 
 ```yaml
 extra-deps:
-  - rocksdb-haskell-jprupp-2.7.0
+  - rocksdb-haskell-jprupp-2.7.1
 ```
 
 With `stack --nix`, add RocksDB to the Nix packages:
@@ -441,7 +441,9 @@ Which one to use:
   after seek, which saves creating an iterator for each: the bound moves with
   every `iterSeek`. It needs a `prefixLength` in the `Config`, and each range
   has to be a whole prefix of that length. It also lets RocksDB use its
-  prefix filters to skip the files that have nothing for the prefix.
+  prefix filters to skip the files that have nothing for the prefix. Every
+  key, sought or stored, has to be at least as long as the prefix: see
+  [Things to watch out for](#things-to-watch-out-for).
 - **`totalOrderSeek`** to walk a database that has a `prefixLength` from end
   to end. Without it, an iterator there only promises the keys that share
   the prefix of the key it was sent to.
@@ -561,6 +563,15 @@ are hidden modules.
   prefix it was sent to, or that starts with `iterFirst` or `iterLast`, may
   skip keys. Ask for `totalOrderSeek`, or stay within the prefix with
   `prefixSameAsStart`.
+- With `prefixSameAsStart`, no key may be shorter than the `prefixLength`:
+  not the keys you seek, and not the keys in the database. RocksDB takes the
+  prefix of a key without checking its length and reads the memory that
+  follows a shorter one, so the iterator stops at an arbitrary place. The
+  binding cannot check this, because an iterator does not know how it was
+  made. Where keys can be shorter, use an `upperBound`.
+- With `prefixSameAsStart`, `iterFirst` and `iterLast` give the first and
+  the last prefix of the database, and no more: the iterator stays within
+  the prefix of the key it finds.
 - Destroy an iterator from `createIteratorConfig` with the action that came
   with it, not with `destroyIterator`, which would leave its bounds and read
   options allocated.

@@ -250,6 +250,16 @@ tunedSpec = do
         from "aaa2" itr `shouldReturn` ["aaa2"]
         from "ccc" itr `shouldReturn` ["ccc1"]
         from "abc" itr `shouldReturn` []
+    it "stays within the prefix of the key it finds at either end" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {prefixSameAsStart = True} $ \itr -> do
+        map fst <$> forwards itr `shouldReturn` ["aaa1", "aaa2"]
+        map fst <$> backwards itr `shouldReturn` ["ccc1"]
+    it "stays within the prefix going backwards" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {prefixSameAsStart = True} $ \itr -> do
+        iterSeek itr "bbb2"
+        map fst <$> scan iterPrev itr `shouldReturn` ["bbb2", "bbb1"]
     it "stays within the prefix when the data is in table files" $ \db -> do
       fill db
       -- enough writes to flush the keys out of memory, where the prefix

@@ -55,7 +55,8 @@
 --
 -- * at an 'upperBound' or a 'lowerBound', which are keys;
 -- * at the end of the prefix that it was sent to, with 'prefixSameAsStart',
---   in a database or column family that has a 'prefixLength'.
+--   in a database or column family that has a 'prefixLength' and no key
+--   shorter than it.
 --
 -- Such an iterator becomes invalid at its bound without looking past it. A
 -- bound also lets RocksDB leave out the table files that hold nothing inside
@@ -211,7 +212,8 @@ withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
 --   configuration of the database and works with keys of any shape.
 -- * 'prefixSameAsStart' when one iterator is sent to many ranges, one seek
 --   after another: the bound moves with each seek. It needs a 'prefixLength',
---   and the ranges have to be whole prefixes of that length.
+--   the ranges have to be whole prefixes of that length, and no key may be
+--   shorter than it.
 -- * 'totalOrderSeek' when a database with a 'prefixLength' has to be walked
 --   from end to end.
 data IterConfig = IterConfig
@@ -226,12 +228,21 @@ data IterConfig = IterConfig
       -- 'prefixUpperBound' gives the bound that ends a prefix.
     , prefixSameAsStart :: !Bool
       -- ^ stay within the prefix of the key that the iterator was last sent
-      -- to with 'iterSeek': the iterator becomes invalid instead of moving
-      -- to a key with another prefix. The prefix is the first
-      -- 'Database.RocksDB.prefixLength' bytes of a key. It has no effect in
-      -- a database or column family without a prefix length, nor together
-      -- with 'totalOrderSeek', nor after 'iterFirst' or 'iterLast', which
-      -- name no prefix.
+      -- to: it becomes invalid instead of moving to a key with another
+      -- prefix. The prefix is the first 'Database.RocksDB.prefixLength'
+      -- bytes of a key. After 'iterSeek' it is the prefix of the key
+      -- sought; after 'iterFirst' or 'iterLast', that of the key found, so
+      -- that those two give the first or the last prefix of the database
+      -- and no more. It has no effect in a database or column family
+      -- without a prefix length, nor together with 'totalOrderSeek'.
+      --
+      -- __Every key has to be at least as long as the prefix__: the keys
+      -- sought, and the keys stored. RocksDB takes the prefix of a key
+      -- without looking at its length, so with a shorter key it reads the
+      -- bytes that follow it in memory, and where the iterator stops is
+      -- then anyone's guess. This binding cannot check it for you, because
+      -- an 'Iterator' does not know how it was made. If keys can be
+      -- shorter, use an 'upperBound', which has no such condition.
     , totalOrderSeek :: !Bool
       -- ^ see every key in order, whatever its prefix, in a database or
       -- column family that has a 'Database.RocksDB.prefixLength'. There, a
