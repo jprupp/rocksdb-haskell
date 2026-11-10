@@ -1,3 +1,13 @@
+## 2.6.4
+
+ * Iterators read rows about three times faster. `iterValid`, `iterKey` and
+   `iterValue` now reach RocksDB through unsafe foreign calls. The three only
+   read what the iterator already holds, and reading one row with `iterEntry`
+   and `iterNext` makes five of them; as safe calls each cost about 0.4
+   microseconds. Walking 700,000 rows took 2.8 microseconds a row before and
+   0.8 after. The calls that move an iterator, which can read from disk, are
+   safe calls as before.
+
 ## 2.6.3
 
  * Documentation only; the library behaves as in 2.6.2.
