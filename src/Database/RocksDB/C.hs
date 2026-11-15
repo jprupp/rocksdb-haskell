@@ -21,8 +21,11 @@
 --
 -- The bindings are @safe@ foreign calls. RocksDB calls can take a long time,
 -- for example when they wait for disk or for a compaction to make room, and a
--- @safe@ call lets other Haskell threads keep running meanwhile. The small
--- extra cost per call is worth that in a concurrent program.
+-- @safe@ call lets other Haskell threads keep running meanwhile. The extra
+-- cost per call is worth that in a concurrent program. Where it adds up, in
+-- a scan that moves an iterator once for every entry, the answer is fewer
+-- calls and not unsafe ones: 'c_rocksdb_haskell_iter_chunk' reads many
+-- entries in one.
 --
 -- = Keeping the types in step with the header
 --
@@ -95,6 +98,7 @@ module Database.RocksDB.C
     c_rocksdb_iter_key,
     c_rocksdb_iter_value,
     c_rocksdb_iter_get_error,
+    c_rocksdb_haskell_iter_chunk,
     c_rocksdb_writebatch_create,
     c_rocksdb_writebatch_destroy,
     c_rocksdb_writebatch_clear,
@@ -519,6 +523,36 @@ foreign import ccall unsafe "rocksdb/c.h rocksdb_iter_value"
 -- | Binding to @rocksdb_iter_get_error@.
 foreign import ccall safe "rocksdb/c.h rocksdb_iter_get_error"
   c_rocksdb_iter_get_error :: Iterator -> ErrPtr -> IO ()
+
+-- | Binding to @rocksdb_haskell_iter_chunk@, which is not part of RocksDB: it
+-- is this package's own, in @cbits\/rocksdb_haskell.c@, and its header says
+-- what it promises. It reads many entries of an iterator in one call.
+--
+-- The arguments are the iterator, whether to go backwards, the most entries
+-- and the most bytes to read, the prefix that keys have to start with and its
+-- length, and where to store the buffer with the entries, their number,
+-- whether more follow, and an error of the iterator. The result is not zero
+-- if there was no memory for the first entry. The caller frees the buffer.
+--
+-- A safe call, since it moves the iterator and so may wait for the disk. That
+-- is the point of it: a scan that moves the iterator from Haskell makes a
+-- safe call for every entry, and this makes one for hundreds.
+--
+-- It is imported with @capi@ so that the C compiler checks the types below
+-- against the prototype in the header.
+foreign import capi safe "rocksdb_haskell.h rocksdb_haskell_iter_chunk"
+  c_rocksdb_haskell_iter_chunk ::
+    Iterator ->
+    CInt ->
+    CSize ->
+    CSize ->
+    CString ->
+    CSize ->
+    Ptr CString ->
+    Ptr CSize ->
+    Ptr CUChar ->
+    ErrPtr ->
+    IO CInt
 
 --
 -- Write batch

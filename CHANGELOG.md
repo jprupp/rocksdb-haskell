@@ -22,6 +22,35 @@
    layout of its present `Config`: a Bloom filter, or
    `partitionIndexAndFilters`. RocksDB's own compactions rarely reach the
    last level, where most of the data is.
+ * Many entries of an iterator in one foreign call. `iterNext` and `iterPrev`
+   can wait for the disk, so each is a call for which the Haskell thread
+   gives up its capability and has to get one back, and a scan made one for
+   every entry. `iterChunk` walks the iterator in C, in a small function
+   that now comes with the package (`cbits/rocksdb_haskell.c`), and returns
+   up to 256 entries or 1 MiB from one call, forwards or backwards, within a
+   prefix if one is given, with a flag that tells whether more follow. A
+   `ChunkConfig` sets those limits. `iterEntries`, `iterEntriesBack`,
+   `iterEntriesPrefix` and `iterEntriesPrefixBack` are short forms for a
+   known number of entries. All of them leave the iterator on the first
+   entry that they did not return, respect the bounds of an `IterConfig`,
+   and throw if the iterator stopped at an error. The single steps are
+   unchanged.
+
+   Seconds for every thread to read 200,000 entries of 52 bytes, on four
+   capabilities and four cores (`stack bench`):
+
+   | Scan                                  | 1 thread | 16 threads |
+   | ------------------------------------- | -------- | ---------- |
+   | Single steps, loop not tail recursive | 0.78     | 3.9        |
+   | Single steps, loop tail recursive     | 0.090    | 0.50       |
+   | Chunks of 256 entries                 | 0.048    | 0.25       |
+
+   With all 24 hardware threads of the machine free, the sixteen threads
+   took 4.4, 0.83 and 0.12 seconds: threads inside the call hold no
+   capability, so chunks gain more where there are more cores than
+   capabilities. The first row is a loop that returns its list with
+   `(entry :) <$> go`; the run-time system walks the stack at every such
+   call, and that loop leaves a frame on it for every entry.
  * The `Config` record has new fields, so code that builds one without `def`
    has to set them; code that starts from `def` needs no change. This is why
    the version is 2.8.0 and not 2.7.2.

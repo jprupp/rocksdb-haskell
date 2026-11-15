@@ -32,7 +32,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as C
 import Data.Default (def)
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, isSuffixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
@@ -40,6 +40,7 @@ import Database.RocksDB
 import GHC.Clock (getMonotonicTime)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
+import System.IO (IOMode (ReadWriteMode), SeekMode (AbsoluteSeek), hSeek, withBinaryFile)
 import System.IO.Temp
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
@@ -51,6 +52,8 @@ main :: IO ()
 main = hspec $ do
   around (withTunedDB ["one", "two", "tree"]) tunedSpec
   around withPlainDB plainSpec
+  around withPlainDB chunkSpec
+  chunkErrorSpec
   boundSpec
   openingSpec
   tuningSpec
@@ -263,6 +266,14 @@ tunedSpec = do
       withIterConfig db Nothing def {prefixSameAsStart = True} $ \itr -> do
         iterSeek itr "bbb2"
         map fst <$> scan iterPrev itr `shouldReturn` ["bbb2", "bbb1"]
+    it "stays within the prefix when read in chunks" $ \db -> do
+      fill db
+      withIterConfig db Nothing def {prefixSameAsStart = True} $ \itr -> do
+        iterSeek itr "bbb"
+        iterChunk itr def `shouldReturn` ([("bbb1", "bbb1"), ("bbb2", "bbb2")], False)
+        iterValid itr `shouldReturn` False
+        iterSeek itr "ccc"
+        iterEntriesBack itr 10 `shouldReturn` [("ccc1", "ccc1")]
     it "stays within the prefix when the data is in table files" $ \db -> do
       fill db
       -- enough writes to flush the keys out of memory, where the prefix
@@ -600,6 +611,226 @@ plainSpec = do
           forwards itr `shouldReturn` [("m", "changed"), ("n", "20")]
 
 -------------------------------------------------------------------------------
+-- Reading many entries in one call
+-------------------------------------------------------------------------------
+
+-- | The bytes that the keys and values of some entries take, which is what
+-- 'chunkBytes' limits.
+sizeOf :: [(ByteString, ByteString)] -> Int
+sizeOf entries = sum [BS.length k + BS.length v | (k, v) <- entries]
+
+-- | Read chunk after chunk until one says that no more follow, and give the
+-- chunks. Fails if a chunk is empty when the one before promised more: the
+-- loop would never end.
+chunksOf :: Iterator -> ChunkConfig -> IO [[(ByteString, ByteString)]]
+chunksOf itr cfg = go []
+  where
+    go acc = do
+      (entries, more) <- iterChunk itr cfg
+      if more
+        then do
+          entries `shouldNotBe` []
+          go (entries : acc)
+        else return (reverse (entries : acc))
+
+chunkSpec :: SpecWith DB
+chunkSpec = describe "Reading many entries in one call" $ do
+  let keys = ["a1", "a2", "b1", "b2", "c1"] :: [ByteString]
+      fill db = forM_ keys $ \k -> put db k k
+      same = map (\k -> (k, k))
+      -- ten entries of 108 bytes each: a key of 8 and a value of 100
+      wide = [(key i, BS.replicate 100 (fromIntegral i)) | i <- [0 .. 9]]
+  it "reads the next entries and leaves the iterator after them" $ \db -> do
+    fill db
+    withIter db $ \itr -> do
+      iterFirst itr
+      iterEntries itr 2 `shouldReturn` same ["a1", "a2"]
+      iterKey itr `shouldReturn` Just "b1"
+      iterEntries itr 100 `shouldReturn` same ["b1", "b2", "c1"]
+      iterValid itr `shouldReturn` False
+      iterEntries itr 100 `shouldReturn` []
+  it "reads backwards, in descending order" $ \db -> do
+    fill db
+    withIter db $ \itr -> do
+      iterLast itr
+      iterEntriesBack itr 2 `shouldReturn` same ["c1", "b2"]
+      iterKey itr `shouldReturn` Just "b1"
+      iterEntriesBack itr 100 `shouldReturn` same ["b1", "a2", "a1"]
+      iterValid itr `shouldReturn` False
+  it "reads nothing, and stays, when asked for no entries" $ \db -> do
+    fill db
+    withIter db $ \itr -> do
+      iterSeek itr "b1"
+      iterEntries itr 0 `shouldReturn` []
+      iterEntries itr (-3) `shouldReturn` []
+      iterEntriesBack itr minBound `shouldReturn` []
+      iterChunk itr def {chunkEntries = 0} `shouldReturn` ([], True)
+      iterKey itr `shouldReturn` Just "b1"
+  it "stops at the first key outside the prefix, and stays on it" $ \db -> do
+    fill db
+    withIter db $ \itr -> do
+      iterSeek itr "b"
+      iterEntriesPrefix itr "b" 100 `shouldReturn` same ["b1", "b2"]
+      iterKey itr `shouldReturn` Just "c1"
+      iterEntriesPrefix itr "b" 100 `shouldReturn` []
+      iterKey itr `shouldReturn` Just "c1"
+      iterSeek itr "b2"
+      iterEntriesPrefixBack itr "b" 100 `shouldReturn` same ["b2", "b1"]
+      iterKey itr `shouldReturn` Just "a2"
+  it "takes a key equal to the prefix, and not one shorter than it" $ \db -> do
+    forM_ ["a", "ab", "abc", "b"] $ \k -> put db k ""
+    withIter db $ \itr -> do
+      iterFirst itr
+      iterEntriesPrefix itr "ab" 100 `shouldReturn` []
+      iterSeek itr "ab"
+      map fst <$> iterEntriesPrefix itr "ab" 100 `shouldReturn` ["ab", "abc"]
+  it "tells whether more entries follow" $ \db -> do
+    fill db
+    withIter db $ \itr -> do
+      let cfg = def {chunkPrefix = "a"}
+      iterFirst itr
+      iterChunk itr cfg {chunkEntries = 1} `shouldReturn` (same ["a1"], True)
+      -- the limit is reached where the prefix ends: nothing follows
+      iterFirst itr
+      iterChunk itr cfg {chunkEntries = 2} `shouldReturn` (same ["a1", "a2"], False)
+      iterChunk itr cfg `shouldReturn` ([], False)
+      -- and where the data ends
+      iterSeek itr "c1"
+      iterChunk itr def {chunkEntries = 1} `shouldReturn` (same ["c1"], False)
+  it "stops before the limit of bytes" $ \db -> do
+    forM_ wide $ uncurry (put db)
+    withIter db $ \itr -> do
+      let sizes bytes = do
+            iterFirst itr
+            map length <$> chunksOf itr def {chunkBytes = bytes}
+      -- two entries are 216 bytes
+      sizes 250 `shouldReturn` [2, 2, 2, 2, 2]
+      sizes 216 `shouldReturn` [2, 2, 2, 2, 2]
+      sizes 215 `shouldReturn` [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+      sizes 500 `shouldReturn` [4, 4, 2]
+      sizes maxBound `shouldReturn` [10]
+  it "reads one entry at least, whatever the limit of bytes" $ \db -> do
+    forM_ wide $ uncurry (put db)
+    withIter db $ \itr -> forM_ [0, 1, 107, -1, minBound] $ \bytes -> do
+      iterFirst itr
+      chunks <- chunksOf itr def {chunkBytes = bytes}
+      chunks `shouldBe` map (: []) wide
+  it "gets past an entry larger than the limit of bytes" $ \db -> do
+    -- three megabytes between small entries, with a limit of one
+    let big = BS.replicate (3 * 1024 * 1024) 7
+        entries = [("a", "small"), ("b", big), ("c", "small"), ("d", "small")]
+    forM_ entries $ uncurry (put db)
+    withIter db $ \itr -> do
+      iterFirst itr
+      chunks <- chunksOf itr def
+      map (map fst) chunks `shouldBe` [["a"], ["b"], ["c", "d"]]
+      concat chunks `shouldBe` entries
+      iterLast itr
+      back <- chunksOf itr def {chunkBackwards = True}
+      map (map fst) back `shouldBe` [["d", "c"], ["b"], ["a"]]
+  it "reads across many chunks what single steps read" $ \db -> do
+    let entries = [(key i, C.pack (show i)) | i <- [0 .. 9999]]
+    write db (map (uncurry Put) entries)
+    withIter db $ \itr -> forM_ [1, 7, 256, 10000, 20000] $ \n -> do
+      iterFirst itr
+      chunks <- chunksOf itr def {chunkEntries = n}
+      concat chunks `shouldBe` entries
+      map length (init chunks) `shouldSatisfy` all (== n)
+      iterLast itr
+      back <- chunksOf itr def {chunkEntries = n, chunkBackwards = True}
+      concat back `shouldBe` reverse entries
+  it "stops at the bounds of the iterator" $ \db -> do
+    fill db
+    withIterConfig db Nothing def {lowerBound = Just "a2", upperBound = Just "b2"} $ \itr -> do
+      iterFirst itr
+      iterChunk itr def `shouldReturn` (same ["a2", "b1"], False)
+      iterValid itr `shouldReturn` False
+      iterLast itr
+      iterChunk itr def {chunkBackwards = True} `shouldReturn` (same ["b1", "a2"], False)
+      iterValid itr `shouldReturn` False
+  it "reads a prefix backwards from the bound that ends it" $ \db -> do
+    fill db
+    withIterConfig db Nothing def {upperBound = prefixUpperBound "a"} $ \itr -> do
+      iterLast itr
+      iterEntriesPrefixBack itr "a" 100 `shouldReturn` same ["a2", "a1"]
+  it "returns nothing where there is nothing" $ \db -> do
+    withIter db $ \itr -> do
+      iterFirst itr
+      iterChunk itr def `shouldReturn` ([], False)
+      iterEntries itr 10 `shouldReturn` []
+    fill db
+    withIter db $ \itr -> do
+      -- not sent anywhere yet
+      iterChunk itr def `shouldReturn` ([], False)
+      -- a prefix that no key has
+      iterSeek itr "b3"
+      iterChunk itr def {chunkPrefix = "b3"} `shouldReturn` ([], False)
+      iterKey itr `shouldReturn` Just "c1"
+      -- past the last key
+      iterSeek itr "d"
+      iterChunk itr def `shouldReturn` ([], False)
+      iterChunk itr def {chunkBackwards = True} `shouldReturn` ([], False)
+  it "keeps bytes that C takes for the end of a string, and empty keys and values" $ \db -> do
+    let entries = [("", "empty key"), ("\0", ""), ("\0\0a", "\0b\0"), ("\0\255", "\255\0")]
+    forM_ entries $ uncurry (put db)
+    withIter db $ \itr -> do
+      iterFirst itr
+      iterEntries itr 100 `shouldReturn` entries
+      iterSeek itr "\0"
+      iterEntriesPrefix itr "\0\0" 100 `shouldReturn` []
+      iterEntriesPrefix itr "\0" 100 `shouldReturn` drop 1 entries
+  it "stays within its column family" $ \db -> do
+    other <- firstFamily db
+    fill db
+    putCF db other "b9" "other"
+    withIterCF db other $ \itr -> do
+      iterFirst itr
+      iterEntries itr 100 `shouldReturn` [("b9", "other")]
+  it "returns entries that outlive the iterator" $ \db -> do
+    let entries = [(key i, BS.replicate 50 (fromIntegral i)) | i <- [0 .. 999]]
+    write db (map (uncurry Put) entries)
+    got <- withIter db $ \itr -> iterFirst itr >> iterEntries itr 1000
+    -- the heap is churned before the entries are looked at
+    sum (map BS.length [key j | j <- [1 .. 20000]]) `shouldBe` 160000
+    got `shouldBe` entries
+  it "reads the same from many threads at once" $ \db -> do
+    let entries = [(key i, C.pack (show i)) | i <- [0 .. 19999]]
+    write db (map (uncurry Put) entries)
+    results <- forConcurrently [1 .. 16 :: Int] $ \n ->
+      withIter db $ \itr -> do
+        iterFirst itr
+        concat <$> chunksOf itr def {chunkEntries = n * 10}
+    forM_ results (`shouldBe` entries)
+
+-- | An iterator that meets a block it cannot read is no longer valid, which
+-- is also how it looks at the end of the data. A scan in chunks has to tell
+-- the two apart by itself, since its caller gets a list and nothing else.
+chunkErrorSpec :: Spec
+chunkErrorSpec = describe "Reading many entries from a damaged file" $ do
+  it "throws, where single steps look as if the data had ended" $
+    withTempPath $ \path -> do
+      -- compacted, so that the entries are in a table file
+      withDB path plain $ \db -> do
+        forM_ [0 .. 999] $ \i -> put db (key i) (BS.replicate 100 (fromIntegral i))
+        compactRange db Nothing Nothing Nothing
+      tables <- filter (".sst" `isSuffixOf`) <$> listDirectory path
+      tables `shouldNotBe` []
+      -- garbage over the start of each file, where the first block of
+      -- entries is: its checksum no longer matches
+      forM_ tables $ \table ->
+        withBinaryFile (path </> table) ReadWriteMode $ \h -> do
+          hSeek h AbsoluteSeek 100
+          BS.hPut h (BS.replicate 100 0xa5)
+      withDB path plain $ \db -> withIter db $ \itr -> do
+        iterFirst itr
+        iterValid itr `shouldReturn` False
+        iterGetError itr >>= (`shouldSatisfy` isJust)
+        iterFirst itr
+        iterChunk itr def `shouldThrow` anyIOException
+        iterFirst itr
+        iterEntries itr 10 `shouldThrow` anyIOException
+
+-------------------------------------------------------------------------------
 -- Opening and closing
 -------------------------------------------------------------------------------
 
@@ -832,6 +1063,39 @@ genValue = do
   n <- frequency [(1, return 0), (4, choose (1, 24))]
   BS.pack <$> vectorOf n arbitrary
 
+-- | A prefix that keys of 'genKey' often start with, and often the empty
+-- one, which every key starts with.
+genPrefix :: Gen ByteString
+genPrefix = do
+  n <- frequency [(2, return 0), (2, return 1), (1, return 2)]
+  BS.pack <$> vectorOf n (elements [0, 1, 97, 255])
+
+-- | Chunks small enough that a scan of a few entries takes several, with a
+-- limit of bytes that is often below the size of one entry: 'genKey' and
+-- 'genValue' give entries of up to 27 bytes.
+genChunk :: Gen ChunkConfig
+genChunk = do
+  entries <- choose (1, 5)
+  bytes <- frequency [(1, return 0), (3, choose (1, 60)), (1, return maxBound)]
+  prefix <- genPrefix
+  back <- arbitrary
+  return
+    ChunkConfig
+      { chunkEntries = entries,
+        chunkBytes = bytes,
+        chunkPrefix = prefix,
+        chunkBackwards = back
+      }
+
+-- | An iterator with no bound, one, or two that leave a range between them.
+genBounds :: Gen IterConfig
+genBounds = do
+  a <- genKey
+  b <- genKey
+  lower <- elements [Nothing, Just (min a b)]
+  upper <- elements [Nothing, Just (max a b)]
+  return def {lowerBound = lower, upperBound = upper}
+
 genOps :: Gen [Op]
 genOps = listOf $ frequency [(3, Set <$> genKey <*> genValue), (1, Unset <$> genKey)]
 
@@ -909,6 +1173,58 @@ modelSpec = describe "Agreement with a Map" $ do
       withIter db $ \itr -> forM_ targets $ \target -> do
         iterSeek itr target
         iterEntry itr `shouldReturn` Map.lookupGE target (model ops)
+  prop "in chunks, as one step at a time" $
+    forAllOps $ \ops -> forAll genChunk $ \cfg -> forAll genBounds $ \bounds ->
+      forAll genKey $ \start -> inNewDB $ \db -> do
+        runOps db ops
+        withIterConfig db Nothing bounds $ \itr -> do
+          let step = if chunkBackwards cfg then iterPrev else iterNext
+              place = do
+                iterSeek itr start
+                valid <- iterValid itr
+                when (chunkBackwards cfg && not valid) (iterLast itr)
+          -- what single steps read from there to the end, and the part of
+          -- it that the chunks are to return
+          place
+          rest <- scan step itr
+          let wanted = takeWhile ((chunkPrefix cfg `BS.isPrefixOf`) . fst) rest
+          place
+          let go done = do
+                (entries, more) <- iterChunk itr cfg
+                let done' = done + length entries
+                    left = drop done' wanted
+                -- the entries that come next, within both limits
+                entries `shouldBe` take (length entries) (drop done wanted)
+                length entries `shouldSatisfy` (<= chunkEntries cfg)
+                when (length entries > 1) $
+                  sizeOf entries `shouldSatisfy` (<= chunkBytes cfg)
+                -- and not fewer than the limits allow
+                when (length entries < chunkEntries cfg) $
+                  sizeOf (entries <> take 1 left) `shouldSatisfy` (\n -> null left || n > chunkBytes cfg)
+                -- the flag says whether anything is left
+                more `shouldBe` not (null left)
+                -- the iterator is on the first entry that was not returned
+                iterEntry itr `shouldReturn` listToMaybe (drop done' rest)
+                when more $ do
+                  entries `shouldNotBe` []
+                  go done'
+          go 0
+          iterGetError itr `shouldReturn` Nothing
+  prop "a number of entries at once, as one step at a time" $
+    forAllOps $ \ops -> forAll (choose (0, 8)) $ \n -> forAll arbitrary $ \back ->
+      forAll genPrefix $ \prefix -> forAll genKey $ \start -> inNewDB $ \db -> do
+        runOps db ops
+        withIter db $ \itr -> do
+          let step = if back then iterPrev else iterNext
+          iterSeek itr start
+          rest <- scan step itr
+          iterSeek itr start
+          (if back then iterEntriesBack else iterEntries) itr n `shouldReturn` take n rest
+          iterEntry itr `shouldReturn` listToMaybe (drop n rest)
+          let wanted = take n (takeWhile ((prefix `BS.isPrefixOf`) . fst) rest)
+          iterSeek itr start
+          (if back then iterEntriesPrefixBack else iterEntriesPrefix) itr prefix n `shouldReturn` wanted
+          iterEntry itr `shouldReturn` listToMaybe (drop (length wanted) rest)
   prop "through a snapshot, whatever is written afterwards" $
     forAllOps $ \earlier -> forAllOps $ \later -> inNewDB $ \db -> do
       let keys = map opKey (earlier <> later)

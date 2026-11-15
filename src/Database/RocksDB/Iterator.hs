@@ -73,6 +73,57 @@
 --         go []
 -- @
 --
+-- = Reading many entries in one call
+--
+-- 'iterNext' and 'iterPrev' may wait for the disk, so they are foreign calls
+-- of the kind that lets other Haskell threads run meanwhile. That has a
+-- price: the thread gives up its capability for the call and has to get one
+-- back afterwards, and when more threads want to run than there are
+-- capabilities, it waits for it. A scan that moves one step at a time pays
+-- that for every entry.
+--
+-- The run-time system also walks the stack of the thread at every such call.
+-- A loop that is not tail recursive, such as one that ends in
+-- @(entry :) \<$\> go@, leaves a frame there for every entry read so far, so
+-- each step costs more the deeper the scan is.
+--
+-- 'iterChunk' walks the iterator in C instead, and returns up to some
+-- hundreds of entries from one call. 'iterEntries', 'iterEntriesBack',
+-- 'iterEntriesPrefix' and 'iterEntriesPrefixBack' are short forms of it for
+-- a known number of entries.
+--
+-- @
+-- -- the same scan again, in chunks
+-- usersFrom db = 'withIter' db $ \it -> do
+--     'iterSeek' it "user:"
+--     let go acc = do
+--             (entries, more) <- 'iterChunk' it def{'chunkPrefix' = "user:"}
+--             let acc' = entries : acc
+--             if more then go acc' else return (concat (reverse acc'))
+--     go []
+-- @
+--
+-- Seconds for every thread to read 200,000 entries of 52 bytes, on four
+-- capabilities and four cores, from the benchmark of this package:
+--
+-- > scan                                 1 thread   16 threads
+-- > single steps, not tail recursive       0.78        3.9
+-- > single steps, tail recursive           0.090       0.50
+-- > chunks of 256 entries                  0.048       0.25
+--
+-- So a scan in chunks takes half the time of the best loop of single steps,
+-- and a sixteenth of the time of a loop that is not tail recursive. On a
+-- machine with more cores than capabilities it gains more, since the threads
+-- that are inside the call do not hold a capability: with twenty more cores
+-- free, the sixteen threads took 0.12 seconds in chunks and 0.83 in steps.
+--
+-- Use chunks to read a range. Keep to single steps where each move depends
+-- on the entry just read, or where one entry is all that is wanted:
+-- 'iterEntry' after a seek reads it with no call that moves the iterator.
+--
+-- A chunk also reports errors by itself: 'iterChunk' throws if the iterator
+-- stopped at one, where single steps need 'iterGetError' to be asked.
+--
 -- = Safety
 --
 -- The C API crashes the process if an invalid iterator is moved, and the bytes
@@ -111,10 +162,18 @@ module Database.RocksDB.Iterator
     iterSeek,
     iterValid,
     iterValue,
+
+    -- * Reading many entries in one call
+    iterEntries,
+    iterEntriesBack,
+    iterEntriesPrefix,
+    iterEntriesPrefixBack,
+    ChunkConfig (..),
+    iterChunk,
   )
 where
 
-import Control.Exception (bracket, mask_, onException)
+import Control.Exception (bracket, finally, mask, mask_, onException, throwIO)
 import Control.Monad (forM, forM_, when)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as B
@@ -125,7 +184,7 @@ import Database.RocksDB.Internal
 import Foreign
 import Foreign.C.Error (throwErrnoIfNull)
 import Foreign.C.String (CString)
-import Foreign.C.Types (CSize)
+import Foreign.C.Types (CChar, CSize)
 
 -- | Create 'Iterator' and use it.
 --
@@ -479,9 +538,208 @@ iterGetError iter_ptr = alloca $ \err_ptr -> do
     then return Nothing
     else Just <$> BU.unsafePackMallocCString err_str
 
+-- | The next entries, at most as many as asked for, from the one the
+-- iterator is on and going forwards. The iterator is left on the entry after
+-- the last one returned, so that calling again continues the scan.
+--
+-- Fewer entries than asked for means that the iterator reached the end, of
+-- the data or of its bounds, and is no longer valid. A count of zero or less
+-- returns nothing and does not move the iterator.
+--
+-- It returns what that many rounds of 'iterEntry' and 'iterNext' would, from
+-- one foreign call for all of them; see the module header for what that
+-- saves. Every entry is held in memory at once, twice for a moment, so ask
+-- for no more than fit: to read a range of unknown size, call it in a loop,
+-- or use 'iterChunk', which also takes a limit in bytes.
+--
+-- Throws an 'IOError' if the iterator stopped because of an error.
+iterEntries :: Iterator -> Int -> IO [(ByteString, ByteString)]
+iterEntries it n = fst <$> iterChunk it whole {chunkEntries = n}
+
+-- | Like 'iterEntries', going backwards: the entry that the iterator is on
+-- comes first and those before it follow, in descending order. The iterator
+-- is left on the entry before the last one returned.
+iterEntriesBack :: Iterator -> Int -> IO [(ByteString, ByteString)]
+iterEntriesBack it n = fst <$> iterChunk it whole {chunkEntries = n, chunkBackwards = True}
+
+-- | Like 'iterEntries', for the keys that start with a prefix: it also stops
+-- at the first entry whose key does not, and leaves the iterator on that
+-- entry, which is not returned. Fewer entries than asked for means that the
+-- keys with the prefix have all been read.
+--
+-- It does not seek: send the iterator to the prefix with 'iterSeek' first.
+--
+-- @
+-- -- the first hundred users
+-- 'iterSeek' it "user:"
+-- users <- 'iterEntriesPrefix' it "user:" 100
+-- @
+iterEntriesPrefix :: Iterator -> ByteString -> Int -> IO [(ByteString, ByteString)]
+iterEntriesPrefix it prefix n =
+  fst <$> iterChunk it whole {chunkEntries = n, chunkPrefix = prefix}
+
+-- | Like 'iterEntriesPrefix', going backwards as 'iterEntriesBack' does. The
+-- iterator has to be on the last key of the prefix to begin with: 'iterLast'
+-- puts it there if its 'upperBound' is the 'prefixUpperBound' of the prefix.
+iterEntriesPrefixBack :: Iterator -> ByteString -> Int -> IO [(ByteString, ByteString)]
+iterEntriesPrefixBack it prefix n =
+  fst <$> iterChunk it whole {chunkEntries = n, chunkPrefix = prefix, chunkBackwards = True}
+
+-- | A chunk with no limit on its bytes and no prefix, for the functions that
+-- promise a number of entries.
+whole :: ChunkConfig
+whole = def {chunkBytes = maxBound}
+
+-- | What one call of 'iterChunk' reads: how much, which keys, and in which
+-- direction. 'def' reads forwards, any key, up to 256 entries or 1 MiB;
+-- override the fields you need:
+--
+-- @
+-- def { 'chunkPrefix' = "user:" }
+-- @
+--
+-- The two limits are there for different reasons. 'chunkEntries' spreads
+-- the cost of the foreign call over many entries. In the benchmark of this
+-- package, chunks of 16 take up to a fifth longer than chunks of 256, and chunks
+-- of 1024 are no faster; a larger chunk only makes a reader that stops early
+-- pay for more entries that it does not want. 'chunkBytes' bounds the
+-- memory: a chunk is held twice for a moment, in the buffer that C fills and
+-- in the 'ByteString's copied from it, and 256 values can be of any size.
+data ChunkConfig = ChunkConfig
+  { -- | the most entries to read. Zero or less reads nothing.
+    chunkEntries :: !Int,
+    -- | stop before the keys and values read take more bytes than this. The
+    -- first entry is read whatever its size, so a chunk is only empty where
+    -- there is nothing to read, and a scan gets past an entry that is
+    -- larger than the limit.
+    chunkBytes :: !Int,
+    -- | read only entries whose key starts with these bytes, and stop at the
+    -- first one that does not. Empty, the default, for any key.
+    --
+    -- The iterator still has to move to that first key to see that it is
+    -- outside, as in a loop written by hand, and that can be slow where
+    -- deleted keys follow the range: see the module header. An 'upperBound'
+    -- or 'prefixSameAsStart' stops the iterator before it, and this prefix
+    -- is then not needed, though it does no harm.
+    chunkPrefix :: !ByteString,
+    -- | go backwards, with 'iterPrev', and return the entries in descending
+    -- order.
+    chunkBackwards :: !Bool
+  }
+  deriving (Eq, Show)
+
+-- | Forwards, any key, up to 256 entries or 1 MiB of keys and values.
+instance Default ChunkConfig where
+  def =
+    ChunkConfig
+      { chunkEntries = 256,
+        chunkBytes = 1024 * 1024,
+        chunkPrefix = B.empty,
+        chunkBackwards = False
+      }
+
+-- | Read the next entries, as a t'ChunkConfig' says, from the one the
+-- iterator is on, and tell whether more follow.
+--
+-- This is the function to build a scan on. The iterator is walked in C, in
+-- one foreign call for the whole chunk, where a loop of 'iterEntry' and
+-- 'iterNext' makes several for every entry; the module header has the
+-- figures.
+--
+-- @
+-- -- every entry whose key starts with "user:"
+-- 'iterSeek' it "user:"
+-- let go acc = do
+--         (entries, more) <- 'iterChunk' it def{'chunkPrefix' = "user:"}
+--         let acc' = entries : acc
+--         if more then go acc' else return (concat (reverse acc'))
+-- go []
+-- @
+--
+-- The chunk ends at the first of: the end of the data; a bound of the
+-- iterator, from 'upperBound', 'lowerBound' or 'prefixSameAsStart', which
+-- all work as they do with 'iterNext' and 'iterPrev'; a key that does not
+-- start with 'chunkPrefix'; 'chunkEntries' entries; 'chunkBytes' bytes.
+--
+-- __Where the iterator is left:__ on the first entry that was not returned,
+-- or not valid if there is none. So the next call continues where this one
+-- stopped, 'iterEntry' shows the entry that comes next, and after a chunk
+-- that a prefix ended, the iterator is on the first key outside the prefix.
+--
+-- __The flag__ is 'True' if the iterator is left on an entry whose key
+-- starts with 'chunkPrefix': the next call would return something. It is
+-- 'False' when the scan is over, which saves the call that would find that
+-- out by returning nothing.
+--
+-- The entries are ordinary 'ByteString's, each a copy of its own that the
+-- garbage collector frees on its own.
+--
+-- Unlike the functions that move one step, this one throws an 'IOError' if
+-- the iterator stopped because of an error, such as a corrupt block or a
+-- failed read: there is no need to ask 'iterGetError' after it, and a scan
+-- cannot take an error for the end of the data. It also throws if there is
+-- no memory for a single entry.
+iterChunk :: Iterator -> ChunkConfig -> IO ([(ByteString, ByteString)], Bool)
+iterChunk it cfg =
+  BU.unsafeUseAsCStringLen (chunkPrefix cfg) $ \(prefix_ptr, prefix_len) ->
+    alloca $ \buffer_ptr ->
+      alloca $ \count_ptr ->
+        alloca $ \more_ptr ->
+          -- Nothing may interrupt between the call that allocates the
+          -- buffer and the handler that frees it.
+          mask $ \restore -> do
+            poke buffer_ptr nullPtr
+            status <-
+              throwIfErr "iterChunk" $
+                c_rocksdb_haskell_iter_chunk
+                  it
+                  (if chunkBackwards cfg then 1 else 0)
+                  (limit (chunkEntries cfg))
+                  (limit (chunkBytes cfg))
+                  prefix_ptr
+                  (intToCSize prefix_len)
+                  buffer_ptr
+                  count_ptr
+                  more_ptr
+            buffer <- peek buffer_ptr
+            flip finally (free buffer) $ do
+              when (status /= 0) $
+                throwIO (userError "iterChunk: no memory for an entry")
+              count <- peek count_ptr
+              more <- peek more_ptr
+              entries <- restore (unpackChunk buffer (cSizeToInt count))
+              return (entries, more /= 0)
+  where
+    -- a limit below zero is a limit of zero, and not a huge unsigned number
+    limit = intToCSize . max 0
+
 --
 -- Internal
 --
+
+-- | Copy so many entries out of a buffer filled by
+-- 'c_rocksdb_haskell_iter_chunk', in the order they are in. Each entry is
+-- two lengths, the key, the value, and padding up to the size of a length;
+-- see @cbits\/rocksdb_haskell.h@.
+--
+-- Every key and value becomes a 'ByteString' of its own. Slices of the one
+-- buffer would save the copy, and keep the whole chunk alive for as long as
+-- any one key of it is.
+unpackChunk :: Ptr CChar -> Int -> IO [(ByteString, ByteString)]
+unpackChunk buffer = go [] 0
+  where
+    word = sizeOf (0 :: CSize)
+    go acc _ 0 = return (reverse acc)
+    go acc offset n = do
+      key_len <- cSizeToInt <$> peekByteOff buffer offset
+      value_len <- cSizeToInt <$> peekByteOff buffer (offset + word)
+      let key_ptr = buffer `plusPtr` (offset + 2 * word)
+          value_ptr = key_ptr `plusPtr` key_len
+          size = 2 * word + key_len + value_len
+          padded = (size + word - 1) `div` word * word
+      key <- B.packCStringLen (key_ptr, key_len)
+      value <- B.packCStringLen (value_ptr, value_len)
+      go ((key, value) : acc) (offset + padded) (n - 1 :: Int)
 
 -- | Read a C string from the iterator using the given accessor, if the
 -- iterator is valid. The string is copied, since it belongs to the iterator.

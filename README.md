@@ -68,7 +68,9 @@ maintained as `rocksdb-haskell-jprupp`.
 - **Stay close to the C API.** Functions map nearly one to one to RocksDB's C
   functions, so RocksDB's own documentation and tuning guides apply directly.
   Conveniences such as typed keys live in separate libraries
-  ([rocksdb-query](https://github.com/jprupp/rocksdb-query)).
+  ([rocksdb-query](https://github.com/jprupp/rocksdb-query)). The one
+  exception is `iterChunk`, which walks an iterator in a C function of this
+  package, because the cost it removes is that of calling C from Haskell.
 - **Scope every resource.** Databases, snapshots and iterators are C objects
   that must be freed once and never touched again. `withDB`, `withSnapshot` and
   `withIter` free them when their block ends, even on an exception.
@@ -93,6 +95,7 @@ maintained as `rocksdb-haskell-jprupp`.
 | Snapshots      | Consistent point-in-time reads across many queries and iterators               |
 | Iterators      | Ordered scans, forwards and backwards, optionally pinned to a snapshot         |
 | Bounds         | Iterators that stop at a key or at the end of a prefix, without reading past it |
+| Chunks         | Hundreds of entries from one foreign call, in either direction, within a prefix |
 | Tuning         | Bloom filters, fixed-length prefix extractor, shared LRU block cache           |
 | Limits         | Memtable and WAL size limits, open file limit                                  |
 | Administration | Properties (memory use, statistics, SST files), approximate sizes, destroy, repair |
@@ -101,7 +104,7 @@ maintained as `rocksdb-haskell-jprupp`.
 
 - No transactions (`TransactionDB`, `OptimisticTransactionDB`), merge
   operators, TTL databases, backups or checkpoints.
-- No manual compaction, `DeleteRange` or `SingleDelete`.
+- No `DeleteRange` or `SingleDelete`.
 - No custom comparators: keys always sort by their bytes.
 
 Pull requests that add bindings for these are welcome.
@@ -288,6 +291,9 @@ eventsOf db user = withIter db $ \it -> do
   go []
 ```
 
+A list of thousands of events is read faster in chunks: see
+[Reading many entries in one call](#reading-many-entries-in-one-call).
+
 ### 4. Read consistently with a snapshot
 
 If another thread logs events while you read the counter and then the events,
@@ -464,6 +470,76 @@ after the first one, which finds nothing, in microseconds:
 iterator together with the action that destroys it, which also frees the
 bounds: RocksDB keeps pointers to them for as long as the iterator lives.
 
+### Reading many entries in one call
+
+`iterNext` may wait for the disk, so it is a foreign call of the kind that
+lets other Haskell threads run meanwhile. For that, the thread gives up its
+capability and has to get one back when the call returns. A scan that moves
+one step at a time pays this for every entry, and under load, when more
+threads want to run than there are capabilities, it waits each time.
+
+`iterChunk` walks the iterator in C and returns up to some hundreds of
+entries from one call, with a flag that tells whether more follow:
+
+```haskell
+-- every key that starts with "user:", in chunks
+withIter db $ \it -> do
+  iterSeek it "user:"
+  let go acc = do
+        (entries, more) <- iterChunk it def {chunkPrefix = "user:"}
+        let acc' = entries : acc
+        if more then go acc' else return (concat (reverse acc'))
+  go []
+```
+
+The `ChunkConfig` says what one call reads:
+
+| Field            | Default | What it does                                                        |
+| ---------------- | ------- | ------------------------------------------------------------------- |
+| `chunkEntries`   | 256     | The most entries to read                                            |
+| `chunkBytes`     | 1 MiB   | Stop before keys and values take more; one entry is always read     |
+| `chunkPrefix`    | empty   | Stop at the first key that does not start with it                   |
+| `chunkBackwards` | `False` | Go backwards, as `iterPrev` does                                    |
+
+The iterator is left on the first entry that was not returned, so the next
+call continues there. A bound of the iterator, from `withIterConfig`, ends a
+chunk as it ends a scan by single steps. And `iterChunk` throws if the
+iterator stopped at an error, so there is no `iterGetError` to remember.
+
+For a known number of entries there are short forms, which return just the
+list: `iterEntries it n`, `iterEntriesBack it n`, `iterEntriesPrefix it
+prefix n` and `iterEntriesPrefixBack it prefix n`. They have no limit of
+bytes, so a list shorter than `n` means that the scan is over.
+
+```haskell
+-- a page of twenty users, starting after the last one seen
+iterSeek it (lastSeen <> "\0")
+page <- iterEntriesPrefix it "user:" 20
+```
+
+What it saves, in this package's benchmark (`stack bench`): seconds for
+every thread to read 200,000 entries of 52 bytes, on four capabilities and
+four cores.
+
+| Scan                                   | 1 thread | 16 threads |
+| -------------------------------------- | -------- | ---------- |
+| Single steps, loop not tail recursive  | 0.78     | 3.9        |
+| Single steps, loop tail recursive      | 0.090    | 0.50       |
+| Chunks of 256 entries                  | 0.048    | 0.25       |
+
+The first row is a loop that builds its list with `(entry :) <$> go`. The
+run-time system walks the stack of a thread at every foreign call that may
+block, and such a loop leaves a frame there for every entry read so far.
+Whatever you read with, keep the result in an argument of the loop.
+
+With more cores than capabilities the chunks gain more, because a thread
+that is inside the call holds no capability: with twenty more cores free,
+the sixteen threads took 0.12 seconds in chunks and 0.83 in single steps.
+
+Keep to single steps where each move depends on the entry just read, or
+where one entry is all you want: `iterEntry` after a seek reads it without
+moving the iterator.
+
 ### Properties and maintenance
 
 ```haskell
@@ -543,10 +619,13 @@ every open file and every memtable can grow without bound.
 | Bounded iterators        | `IterConfig`, `withIterConfig`, `createIteratorConfig`, `prefixUpperBound` |
 | Moving iterators         | `iterSeek`, `iterFirst`, `iterLast`, `iterNext`, `iterPrev`    |
 | Reading from iterators   | `iterKey`, `iterValue`, `iterEntry`, `iterValid`, `iterGetError` |
+| Reading in chunks        | `iterChunk`, `ChunkConfig`                                     |
+| Reading a number of entries | `iterEntries`, `iterEntriesBack`, `iterEntriesPrefix`, `iterEntriesPrefixBack` |
 | Administration           | `getProperty`, `getPropertyCF`, `approximateSize`, `compactRange`, `destroy`, `repair` |
 
 The FFI bindings (`Database.RocksDB.C`) and helpers (`Database.RocksDB.Internal`)
-are hidden modules.
+are hidden modules. `cbits/rocksdb_haskell.c` is the one piece of C in the
+package: the function behind `iterChunk`.
 
 ## Things to watch out for
 
@@ -578,7 +657,17 @@ are hidden modules.
   with it, not with `destroyIterator`, which would leave its bounds and read
   options allocated.
 - Calls into RocksDB are `safe` foreign calls, so they do not block other
-  Haskell threads, but each one costs a little more than an `unsafe` call.
+  Haskell threads, but each one costs more than an `unsafe` call, and much
+  more when threads compete for capabilities. A scan by single steps makes
+  one for every entry: read ranges with `iterChunk`.
+- A loop over an iterator that is not tail recursive gets slower with every
+  entry, because the run-time system walks the stack at each foreign call.
+  Keep what has been read in an argument of the loop.
+- `iterChunk` and the `iterEntries` functions leave the iterator on the
+  first entry that they did not return, not on the last one that they did.
+- An `iterChunk` with a `chunkPrefix` still moves the iterator to the first
+  key outside the prefix, as a loop written by hand does. Where deleted keys
+  follow the range, the iterator needs a bound as well.
 - Releases before 2.6.2 built no Bloom filters on RocksDB 6.24 or later,
   whatever `bloomFilter` said: they passed the bits per key as an integer to a
   function that had come to take a `double`. A database written by one of them
@@ -600,10 +689,15 @@ cd rocksdb-haskell
 
 stack build                        # build the library
 stack test                         # run the tests
+stack bench                        # time scans by single steps and in chunks
 stack haddock --no-haddock-deps    # build the API documentation
 ```
 
 With `stack --nix`, the `nix` section of `stack.yaml` provides RocksDB.
+
+`bench/Scan.hs` times a scan of 200,000 entries by single steps and in
+chunks, from one thread and from sixteen on four capabilities. To see what
+a machine with four cores does, confine it: `taskset -c 0-3 stack bench`.
 
 ### Nix
 
@@ -631,7 +725,8 @@ so they need RocksDB installed and nothing else. There are two kinds:
 - **Properties** apply random writes to the database and to a `Map`, and
   require that every way of reading the database agrees with the map: point
   reads, `multiGet`, iteration in both directions, seeks, snapshots and
-  column families. The keys are short and drawn from the bytes a binding is
+  column families. Chunks are held to what single steps read, with random
+  limits, prefixes and bounds. The keys are short and drawn from the bytes a binding is
   most likely to mishandle, zero and 255, so that operations often meet on
   the same key.
 

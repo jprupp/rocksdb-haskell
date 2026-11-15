@@ -11,6 +11,7 @@ extra-source-files:
   - README.md
   - CHANGELOG.md
   - AUTHORS
+  - cbits/rocksdb_haskell.h
 
 ghc-options: -Wall
 
@@ -25,6 +26,10 @@ library:
   exposed-modules:
     Database.RocksDB
   extra-libraries: rocksdb
+  # what the C API of RocksDB lacks: see cbits/rocksdb_haskell.h
+  c-sources: cbits/rocksdb_haskell.c
+  include-dirs: cbits
+  cc-options: -Wall
 
 tests:
   spec:
@@ -43,3 +48,19 @@ tests:
       - containers
       - directory
       - filepath
+
+benchmarks:
+  scan:
+    main: Scan.hs
+    source-dirs: bench
+    # four capabilities whatever the machine has, so that sixteen threads
+    # compete for them as the threads of a busy server do
+    ghc-options:
+      - -O2
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N4
+    dependencies:
+      - rocksdb-haskell-jprupp
+      - async
+      - temporary
