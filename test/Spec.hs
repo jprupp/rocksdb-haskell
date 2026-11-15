@@ -1050,8 +1050,10 @@ packedSpec = describe "Packed batches" $ do
                 Left e -> do
                   ioeGetErrorString e `shouldSatisfy` (not . ("writePacked" `isPrefixOf`))
                   ioeGetErrorString e `shouldSatisfy` ("erge" `isInfixOf`)
-                  -- and the put that came with it was not written either
-                  contents db `shouldReturn` [[], [], [], []]
+                  -- the merge was not written; the put that came before
+                  -- it in the batch was not either with RocksDB 11, and
+                  -- was with RocksDB 8.9
+                  contents db >>= (`shouldSatisfy` (`elem` [[[], [], [], []], [[("a", "1")], [], [], []]]))
                 Right () -> reading `shouldThrow` anyIOException
         asMerge [packOps [Put "a" "1"], record Nothing PackedMerge "k" "v"] (get db "k")
         asMerge [record (Just other) PackedMerge "k" "v", packOps [Put "a" "1"]] (getCF db other "k")
@@ -1280,7 +1282,9 @@ mergeSpec = describe "Merge records" $ do
       mergeCF db none "k" "v" `shouldThrow` anyIOException
       write db [Put "a" "1", MergeCF none "k" "v"] `shouldThrow` anyIOException
       writePacked db [packOps [Put "a" "1", MergeCF none "k" "v"]] `shouldThrow` anyIOException
-      contents db `shouldReturn` [[], [], [], []]
+      -- the merge is nowhere; RocksDB 8.9 keeps the put that came before
+      -- it in the refused batch, RocksDB 11 does not
+      contents db >>= (`shouldSatisfy` (`elem` [[[], [], [], []], [[("a", "1")], [], [], []]]))
   -- A database is opened without the merge operator that its records need
   -- by a program that does not know of them. RocksDB opens it all the
   -- same. This is what RocksDB 11 does with records that are in table

@@ -136,8 +136,11 @@ data BatchOp
   | -- | add a merge record to a key of the default column family: the
     -- second byte string is for the t'MergeOperator' of the column family
     -- to combine with the value that the key has. Nothing is read when
-    -- the batch is written. RocksDB refuses the whole batch if the column
-    -- family has no merge operator.
+    -- the batch is written. RocksDB refuses the batch if the column family
+    -- has no merge operator, and 'write' throws. What is left of such a
+    -- batch depends on the version: RocksDB 11 keeps none of it, RocksDB
+    -- 8.9 keeps the operations that came before the merge. Give every
+    -- column family that gets merge records its operator.
     Merge !ByteString !ByteString
   | -- | add a merge record to a key of a column family
     MergeCF !ColumnFamily !ByteString !ByteString
@@ -807,10 +810,11 @@ data PackedOp
     -- value of the record is for the t'MergeOperator' of the column family
     -- to combine with the value that the key has.
     --
-    -- On a column family without a merge operator, RocksDB 11 refuses the
-    -- whole batch when it is written, and 'writePacked' throws. Do not
-    -- count on that with another version: one that takes the batch has
-    -- stored a record that it cannot read.
+    -- On a column family without a merge operator, RocksDB refuses the
+    -- batch when it is written, and 'writePacked' throws. RocksDB 11 then
+    -- keeps none of the batch; RocksDB 8.9 keeps the operations that came
+    -- before the merge. Do not count on either: a batch that is not all
+    -- or nothing is what a batch is there to prevent.
     PackedMerge
   deriving (Eq, Show, Enum, Bounded)
 
