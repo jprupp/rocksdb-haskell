@@ -79,6 +79,14 @@
 -- to 'withDBCF'. Functions ending in @CF@ act on a given column family; the
 -- others act on the default column family.
 --
+-- = Merges
+--
+-- A value can be changed without being read: a merge record ('merge', or
+-- 'Merge' in a batch) says how it changes, and the t'MergeOperator' that
+-- the 'mergeOperator' of the t'Config' gives the column family works out
+-- the value when the key is read or compacted. See t'MergeOperator' for
+-- what that is and what it asks of every program that opens the database.
+--
 -- = Errors
 --
 -- Errors reported by RocksDB are thrown as 'IOError' exceptions created with

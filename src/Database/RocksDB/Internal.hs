@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- |
@@ -14,6 +15,7 @@
 -- implementation detail.
 module Database.RocksDB.Internal
   ( Config (..),
+    MergeOperator (..),
     DB (..),
 
     -- * Smart constructors & extractors
@@ -161,8 +163,119 @@ data Config = Config
     -- compaction already waits for the disk, and a
     -- second one only makes every read wait longer.
     -- Database-wide, ignored in column family configs
-    maxBackgroundJobs :: !(Maybe Int)
+    maxBackgroundJobs :: !(Maybe Int),
+    -- | how RocksDB works out the value of a key that has
+    -- merge records ('Database.RocksDB.Merge'): see
+    -- t'MergeOperator'. 'Nothing', the default, for a
+    -- column family that is never written with merges; one
+    -- that is must be given the same operator every time
+    -- the database is opened, by every program that opens
+    -- it. Per column family: the one in the configuration
+    -- of the database is for the default column family
+    mergeOperator :: !(Maybe MergeOperator),
+    -- | do not compact the files of the column family in
+    -- the background. Files then pile up as memtables are
+    -- flushed, and reads get slower with each: it is for
+    -- a bulk load that ends with
+    -- 'Database.RocksDB.compactRange', and for tests and
+    -- benchmarks that need to know which file a key is
+    -- in. Per column family
+    disableAutoCompactions :: !Bool
   }
+  deriving (Eq, Show)
+
+-- | How RocksDB combines the merge records of a key with its value.
+--
+-- = What a merge is
+--
+-- A put replaces the value of a key, and a program that wants to change
+-- a value has to read it first: add to a counter, add an entry to a list.
+-- For a batch of thousands of such changes, those reads are most of the
+-- work, and each may wait for the disk.
+--
+-- A /merge record/ is a third kind of write, next to a put and a delete
+-- ('Database.RocksDB.Merge', 'Database.RocksDB.merge'). It says how the
+-- value changes and not what it becomes: \"add 5\", \"add this entry\".
+-- RocksDB stores the record as it is, without reading anything. The work
+-- is done later by the /merge operator/ of the column family: a function
+-- that takes the value that the key had and the records written since,
+-- oldest first, and gives the value that the key now has. RocksDB calls
+-- it when the key is read, and when a compaction brings the records and
+-- the value together, after which the key holds a plain value again.
+--
+-- Readers see none of this: 'Database.RocksDB.get',
+-- 'Database.RocksDB.multiGet' and iterators return merged values. What
+-- they pay is the merge, for a key that has records pending, and a look
+-- into each file that holds one of them.
+--
+-- A put or a delete after merge records hides them, like any older
+-- value. A merge record after a delete, or on a key that was never
+-- written, is merged with no value: the operator decides what that means.
+--
+-- = Which operator
+--
+-- The operator is part of the meaning of the data, like the format of
+-- the values. Every program that opens the database must give the column
+-- family the same operator, because RocksDB does not refuse to open one
+-- that has merge records without it. This is what RocksDB 11.1 was seen to
+-- do then:
+--
+-- * Merge records that are still in the write-ahead log, not yet flushed
+--   to a table file, are __dropped when the database is opened__, without
+--   an error. They are lost for good.
+--
+-- * Merge records in table files are kept, also through a compaction, and
+--   are there again for a program that opens the database with the
+--   operator. Meanwhile they cannot be read: 'Database.RocksDB.get' throws
+--   for a key that has records and no value under them, an iterator stops
+--   at such a key with an error, and a 'Database.RocksDB.get' or
+--   'Database.RocksDB.multiGet' of a key that has a value under its
+--   records __crashes the process__.
+--
+-- * Writing a merge record is refused.
+--
+-- A column family opened with another operator gives whatever that
+-- operator makes of the records. So a program that starts to write merge
+-- records to a database that older versions of it can open should make
+-- sure that they no longer can: a column family that they do not know of
+-- is enough, as RocksDB refuses to open a database without all its column
+-- families, before it reads the write-ahead log.
+data MergeOperator
+  = -- | RocksDB's own operator for counters. A value and a merge record
+    -- are both an unsigned 64-bit number in eight bytes, least significant
+    -- byte first, and merging adds them, modulo 2^64. A key without a
+    -- value counts from zero, and so does one whose value is not eight
+    -- bytes long.
+    UInt64Add
+  | -- | An operator made of two C functions.
+    --
+    -- They are C functions and not Haskell ones because RocksDB calls
+    -- them from its own threads, during reads, flushes and compactions,
+    -- several at once. Import their addresses:
+    --
+    -- @
+    -- foreign import ccall "&my_full_merge" myFullMerge :: FunPtr FullMerge
+    -- foreign import ccall "&my_partial_merge" myPartialMerge :: FunPtr PartialMerge
+    -- @
+    --
+    -- @cbits\/rocksdb_haskell.h@ in this package has their C types, as
+    -- @rocksdb_haskell_full_merge_t@ and @rocksdb_haskell_partial_merge_t@,
+    -- and what they must do: return the result in memory from @malloc@,
+    -- which RocksDB frees, and how to report a failure.
+    MergeFunctions
+      { -- | the name of the operator, which RocksDB writes in its
+        -- options file and in every table file. Change it when what
+        -- the functions do changes.
+        mergeName :: !String,
+        -- | the value of a key from the value it had, if any, and its
+        -- merge records, oldest first
+        fullMerge :: !(FunPtr FullMerge),
+        -- | one merge record from several, oldest first, that does what
+        -- they did. RocksDB uses it to shorten the list where it has
+        -- records and not the value under them. A function that always
+        -- fails is allowed: the records are then kept as they are.
+        partialMerge :: !(FunPtr PartialMerge)
+      }
   deriving (Eq, Show)
 
 -- | All flags off and all sizes left to RocksDB defaults.
@@ -182,7 +295,9 @@ instance Default Config where
         cacheIndexAndFilterBlocks = False,
         partitionIndexAndFilters = False,
         maxTotalWalSize = Nothing,
-        maxBackgroundJobs = Nothing
+        maxBackgroundJobs = Nothing,
+        mergeOperator = Nothing,
+        disableAutoCompactions = False
       }
 
 -- | @rocksdb_block_based_table_index_type_two_level_index_search@: an index
@@ -232,6 +347,15 @@ withOptionsCache cache Config {..} f = with_opts $ \opts -> do
     c_rocksdb_options_set_max_total_wal_size opts . fromIntegral
   forM_ maxBackgroundJobs $
     c_rocksdb_options_set_max_background_jobs opts . intToCInt
+  forM_ mergeOperator $ \case
+    UInt64Add -> c_rocksdb_options_set_uint64add_merge_operator opts
+    MergeFunctions {..} ->
+      withCString mergeName $ \name -> do
+        status <- c_rocksdb_haskell_options_set_merge_operator opts name fullMerge partialMerge
+        when (status /= 0) $
+          throwIO (userError "mergeOperator: no memory for the merge operator")
+  when disableAutoCompactions $
+    c_rocksdb_options_set_disable_auto_compactions opts 1
   c_rocksdb_options_set_create_if_missing
     opts
     (boolToCBool createIfMissing)

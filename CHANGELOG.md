@@ -98,6 +98,37 @@
    thread waits for a capability after each of its 65,000 calls. With all
    24 hardware threads of the machine free, that took `write` 1,160 ms,
    and packed chunks 31.
+ * Merge records and merge operators. A merge record is a third kind of
+   write, next to a put and a delete: it says how a value changes, and
+   RocksDB stores it without reading the value. The merge operator of the
+   column family works out the value when the key is read, and when a
+   compaction brings the records and the value together. A program that
+   adds to counters or to lists by the thousand no longer reads each one
+   first.
+   - `mergeOperator`, a new field of `Config`, gives a column family its
+     operator, or the default one when it is in the `Config` of the
+     database. `UInt64Add` is RocksDB's own, for counters. `MergeFunctions`
+     makes one of a name and the addresses of two C functions, a full merge
+     and a partial merge, with the types `FullMerge` and `PartialMerge`.
+     They are C functions because RocksDB calls them from its own threads;
+     `cbits/rocksdb_haskell.h` says what they must do, and a third function
+     of `cbits/rocksdb_haskell.c` makes the operator around them.
+   - `Merge` and `MergeCF` are new constructors of `BatchOp`, written by
+     `write` and packed by `packOps` as `PackedMerge` records. `merge` and
+     `mergeCF` write one record. Code that matches on every `BatchOp` has
+     two more cases.
+   - `get`, `multiGet`, iterators and chunks return merged values, and
+     need no change.
+   - A column family with merge records must be given its operator by
+     every program that opens the database. RocksDB 11.1 opens it without:
+     it then drops the merge records that are still in the write-ahead
+     log, with no error, and a read of a key with a value under merge
+     records crashes the process. The README has the whole table.
+ * `flush` writes the memtable of a column family to a table file and waits
+   for it, and `disableAutoCompactions`, a new field of `Config`, stops
+   RocksDB from compacting a column family in the background. They are for
+   tests and benchmarks that need data in table files, a file for each
+   flush, and for bulk loads that end with `compactRange`.
  * The `Config` record has new fields, so code that builds one without `def`
    has to set them; code that starts from `def` needs no change. This is why
    the version is 2.8.0 and not 2.7.2.

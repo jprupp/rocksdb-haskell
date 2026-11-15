@@ -30,6 +30,9 @@ module Database.RocksDB.Base
 
     -- * Options
     Config (..),
+    MergeOperator (..),
+    FullMerge,
+    PartialMerge,
 
     -- * Basic Database Manipulations
     withDB,
@@ -38,6 +41,8 @@ module Database.RocksDB.Base
     putCF,
     delete,
     deleteCF,
+    merge,
+    mergeCF,
     write,
     get,
     getCF,
@@ -63,6 +68,7 @@ module Database.RocksDB.Base
     repair,
     approximateSize,
     compactRange,
+    flush,
 
     -- * Iteration
     module Database.RocksDB.Iterator,
@@ -127,6 +133,14 @@ data BatchOp
     PutCF !ColumnFamily !ByteString !ByteString
   | -- | delete a key from a column family
     DelCF !ColumnFamily !ByteString
+  | -- | add a merge record to a key of the default column family: the
+    -- second byte string is for the t'MergeOperator' of the column family
+    -- to combine with the value that the key has. Nothing is read when
+    -- the batch is written. RocksDB refuses the whole batch if the column
+    -- family has no merge operator.
+    Merge !ByteString !ByteString
+  | -- | add a merge record to a key of a column family
+    MergeCF !ColumnFamily !ByteString !ByteString
   deriving (Eq, Show)
 
 -- | Open a database at the given path and pass its handle to a function.
@@ -589,6 +603,62 @@ deleteCommon DB {rocksDB = db_ptr, writeOpts = write_opts} mcf key =
       Just cf -> c_rocksdb_delete_cf db_ptr write_opts cf key_ptr (intToCSize klen)
       Nothing -> c_rocksdb_delete db_ptr write_opts key_ptr (intToCSize klen)
 
+-- | Add a merge record to a key of the default column family, for the
+-- t'MergeOperator' of the column family to combine with the value that the
+-- key has. Nothing is read: the merge is done when the key is read, and
+-- when RocksDB compacts the files that hold the record and the value.
+--
+-- Throws an 'IOError' if the column family has no merge operator, and on
+-- any other failure. For many keys at once use a 'Merge' in a batch.
+merge :: DB -> ByteString -> ByteString -> IO ()
+merge db = mergeCommon db Nothing
+
+-- | Like 'merge', but for a key of the given column family.
+mergeCF :: DB -> ColumnFamily -> ByteString -> ByteString -> IO ()
+mergeCF db cf = mergeCommon db (Just cf)
+
+-- | Add a merge record to a key of the default column family, or of a
+-- column family if one is given.
+mergeCommon :: DB -> Maybe ColumnFamily -> ByteString -> ByteString -> IO ()
+mergeCommon DB {rocksDB = db_ptr, writeOpts = write_opts} mcf key value =
+  BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+    BU.unsafeUseAsCStringLen value $ \(val_ptr, vlen) ->
+      throwIfErr "merge" $ case mcf of
+        Just cf ->
+          c_rocksdb_merge_cf
+            db_ptr
+            write_opts
+            cf
+            key_ptr
+            (intToCSize klen)
+            val_ptr
+            (intToCSize vlen)
+        Nothing ->
+          c_rocksdb_merge
+            db_ptr
+            write_opts
+            key_ptr
+            (intToCSize klen)
+            val_ptr
+            (intToCSize vlen)
+
+-- | Write the memtable of the default column family, or of the one given,
+-- to a table file, and return when it is done.
+--
+-- RocksDB flushes by itself when a memtable is full, and a program does
+-- not need this to keep its data: what is in a memtable is in the
+-- write-ahead log too. It is for tests and benchmarks that want data in
+-- table files, where the data of a database in production is, and with
+-- 'disableAutoCompactions' in a file of its own for each flush. Throws an
+-- 'IOError' on failure.
+flush :: DB -> Maybe ColumnFamily -> IO ()
+flush DB {rocksDB = db_ptr} mcf =
+  bracket c_rocksdb_flushoptions_create c_rocksdb_flushoptions_destroy $ \opts -> do
+    c_rocksdb_flushoptions_set_wait opts 1
+    throwIfErr "flush" $ case mcf of
+      Just cf -> c_rocksdb_flush_cf db_ptr opts cf
+      Nothing -> c_rocksdb_flush db_ptr opts
+
 -- | Perform a batch mutation. All operations in the list are applied atomically:
 -- either all of them are written or none are. They are applied in order, so a
 -- later operation on a key overrides an earlier one. Throws an 'IOError' on
@@ -644,6 +714,25 @@ write DB {rocksDB = db_ptr, writeOpts = write_opts} batch =
           cf_ptr
           key_ptr
           (intToCSize klen)
+    batchAdd batch_ptr (Merge key val) =
+      BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+        BU.unsafeUseAsCStringLen val $ \(val_ptr, vlen) ->
+          c_rocksdb_writebatch_merge
+            batch_ptr
+            key_ptr
+            (intToCSize klen)
+            val_ptr
+            (intToCSize vlen)
+    batchAdd batch_ptr (MergeCF cf_ptr key val) =
+      BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+        BU.unsafeUseAsCStringLen val $ \(val_ptr, vlen) ->
+          c_rocksdb_writebatch_merge_cf
+            batch_ptr
+            cf_ptr
+            key_ptr
+            (intToCSize klen)
+            val_ptr
+            (intToCSize vlen)
     touch (Put (PS p _ _) (PS p' _ _)) = do
       touchForeignPtr p
       touchForeignPtr p'
@@ -654,6 +743,12 @@ write DB {rocksDB = db_ptr, writeOpts = write_opts} batch =
       touchForeignPtr p
     touch (DelCF _ (PS p _ _)) =
       touchForeignPtr p
+    touch (Merge (PS p _ _) (PS p' _ _)) = do
+      touchForeignPtr p
+      touchForeignPtr p'
+    touch (MergeCF _ (PS p _ _) (PS p' _ _)) = do
+      touchForeignPtr p
+      touchForeignPtr p'
 
 -- $packed
 --
@@ -708,15 +803,14 @@ data PackedOp
     PackedPut
   | -- | delete the key, as 'Del' and 'DelCF' do; the record has no value
     PackedDel
-  | -- | merge the value into what the key has, with the merge operator of
-    -- the column family (@rocksdb_writebatch_merge@).
+  | -- | add a merge record to the key, as 'Merge' and 'MergeCF' do: the
+    -- value of the record is for the t'MergeOperator' of the column family
+    -- to combine with the value that the key has.
     --
-    -- This binding cannot give a column family a merge operator yet, so
-    -- there is no use for it today: it is here so that the format does not
-    -- have to change when it can. On a column family without a merge
-    -- operator, RocksDB 11 refuses the whole batch when it is written, and
-    -- 'writePacked' throws. Do not count on that with another version: one
-    -- that takes the batch has stored a value that it cannot read.
+    -- On a column family without a merge operator, RocksDB 11 refuses the
+    -- whole batch when it is written, and 'writePacked' throws. Do not
+    -- count on that with another version: one that takes the batch has
+    -- stored a record that it cannot read.
     PackedMerge
   deriving (Eq, Show, Enum, Bounded)
 
@@ -782,6 +876,8 @@ packOps ops = BI.unsafeCreate (sum (map size ops)) $ \start -> foldM_ pack start
     parts (Del k) = (Nothing, PackedDel, k, BS.empty)
     parts (PutCF cf k v) = (Just cf, PackedPut, k, v)
     parts (DelCF cf k) = (Just cf, PackedDel, k, BS.empty)
+    parts (Merge k v) = (Nothing, PackedMerge, k, v)
+    parts (MergeCF cf k v) = (Just cf, PackedMerge, k, v)
     size op = case parts op of
       (_, _, k, v) -> packedHeaderSize + BS.length k + BS.length v
     -- write the record of an operation, and give where the next one goes
@@ -827,7 +923,7 @@ packOps ops = BI.unsafeCreate (sum (map size ops)) $ \start -> foldM_ pack start
 --
 -- Also throws an 'IOError' if RocksDB refuses the batch, as 'write' does.
 -- That is what happens to a batch with a 'PackedMerge' for a column family
--- that has no merge operator: RocksDB 11 refuses it when it is written,
+-- that has no 'mergeOperator': RocksDB 11 refuses it when it is written,
 -- with nothing written.
 writePacked :: DB -> [ByteString] -> IO ()
 writePacked DB {rocksDB = db_ptr, writeOpts = write_opts} chunks =

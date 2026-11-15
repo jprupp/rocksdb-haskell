@@ -59,6 +59,9 @@ test-suite spec
   hs-source-dirs:
       test
   ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
+  cc-options: -Wall
+  c-sources:
+      test/cbits/merge_test.c
   build-depends:
       QuickCheck
     , async

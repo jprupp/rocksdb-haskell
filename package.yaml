@@ -35,6 +35,9 @@ tests:
   spec:
     main: Spec.hs
     source-dirs: test
+    # a merge operator to test with: merge operators are C functions
+    c-sources: test/cbits/merge_test.c
+    cc-options: -Wall
     ghc-options:
       - -threaded
       - -rtsopts

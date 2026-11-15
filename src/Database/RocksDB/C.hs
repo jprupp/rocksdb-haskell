@@ -70,6 +70,8 @@ module Database.RocksDB.C
     c_rocksdb_put_cf,
     c_rocksdb_delete,
     c_rocksdb_delete_cf,
+    c_rocksdb_merge,
+    c_rocksdb_merge_cf,
     c_rocksdb_write,
     c_rocksdb_get,
     c_rocksdb_get_cf,
@@ -108,7 +110,20 @@ module Database.RocksDB.C
     c_rocksdb_writebatch_put_cf,
     c_rocksdb_writebatch_delete,
     c_rocksdb_writebatch_delete_cf,
+    c_rocksdb_writebatch_merge,
+    c_rocksdb_writebatch_merge_cf,
     c_rocksdb_haskell_writebatch_add_packed,
+    FullMerge,
+    PartialMerge,
+    c_rocksdb_haskell_options_set_merge_operator,
+    c_rocksdb_options_set_uint64add_merge_operator,
+    c_rocksdb_options_set_disable_auto_compactions,
+    FlushOptions,
+    c_rocksdb_flushoptions_create,
+    c_rocksdb_flushoptions_destroy,
+    c_rocksdb_flushoptions_set_wait,
+    c_rocksdb_flush,
+    c_rocksdb_flush_cf,
     c_rocksdb_options_create,
     c_rocksdb_options_destroy,
     c_rocksdb_options_set_create_if_missing,
@@ -332,6 +347,31 @@ foreign import ccall safe "rocksdb/c.h rocksdb_delete_cf"
     WriteOpts ->
     ColumnFamily ->
     Key ->
+    CSize ->
+    ErrPtr ->
+    IO ()
+
+-- | Binding to @rocksdb_merge@.
+foreign import ccall safe "rocksdb/c.h rocksdb_merge"
+  c_rocksdb_merge ::
+    RocksDB ->
+    WriteOpts ->
+    Key ->
+    CSize ->
+    Val ->
+    CSize ->
+    ErrPtr ->
+    IO ()
+
+-- | Binding to @rocksdb_merge_cf@.
+foreign import ccall safe "rocksdb/c.h rocksdb_merge_cf"
+  c_rocksdb_merge_cf ::
+    RocksDB ->
+    WriteOpts ->
+    ColumnFamily ->
+    Key ->
+    CSize ->
+    Val ->
     CSize ->
     ErrPtr ->
     IO ()
@@ -611,6 +651,27 @@ foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_delete_cf"
     CSize ->
     IO ()
 
+-- | Binding to @rocksdb_writebatch_merge@.
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_merge"
+  c_rocksdb_writebatch_merge ::
+    WriteBatch ->
+    Key ->
+    CSize ->
+    Val ->
+    CSize ->
+    IO ()
+
+-- | Binding to @rocksdb_writebatch_merge_cf@.
+foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_merge_cf"
+  c_rocksdb_writebatch_merge_cf ::
+    WriteBatch ->
+    ColumnFamily ->
+    Key ->
+    CSize ->
+    Val ->
+    CSize ->
+    IO ()
+
 -- | Binding to @rocksdb_haskell_writebatch_add_packed@, which is not part of
 -- RocksDB: it is this package's own, in @cbits\/rocksdb_haskell.c@, and its
 -- header says what it promises and how a record is laid out. It adds many
@@ -635,6 +696,98 @@ foreign import capi safe "rocksdb_haskell.h rocksdb_haskell_writebatch_add_packe
     CSize ->
     Ptr CSize ->
     IO CInt
+
+--
+-- Merge operators
+--
+
+-- | The type of the function of a merge operator that works out the value
+-- of a key: the full merge of @rocksdb_mergeoperator_create@.
+--
+-- Its arguments are a state that it must not use, the key and its length,
+-- the value that the key has and its length (a null pointer if it has
+-- none), the merge records, oldest first, as an array of pointers and one
+-- of lengths, their number, where to store whether it succeeded, and where
+-- to store the length of the result. It returns the new value in memory
+-- from @malloc@. @cbits\/rocksdb_haskell.h@ says the rest.
+type FullMerge =
+  Ptr () ->
+  CString ->
+  CSize ->
+  CString ->
+  CSize ->
+  Ptr CString ->
+  Ptr CSize ->
+  CInt ->
+  Ptr CUChar ->
+  Ptr CSize ->
+  IO CString
+
+-- | The type of the function of a merge operator that makes one merge
+-- record of several: the partial merge of @rocksdb_mergeoperator_create@.
+-- Its arguments are those of a t'FullMerge' without the value that the key
+-- has.
+type PartialMerge =
+  Ptr () ->
+  CString ->
+  CSize ->
+  Ptr CString ->
+  Ptr CSize ->
+  CInt ->
+  Ptr CUChar ->
+  Ptr CSize ->
+  IO CString
+
+-- | Binding to @rocksdb_haskell_options_set_merge_operator@, which is not
+-- part of RocksDB: it is this package's own, in
+-- @cbits\/rocksdb_haskell.c@. It gives options a merge operator made of a
+-- name and two C functions, and keeps a copy of the name for as long as
+-- the operator lives. The options own the operator. The result is not
+-- zero if there was no memory for it.
+--
+-- It is imported with @capi@ so that the C compiler checks the types below
+-- against the prototype in the header.
+foreign import capi safe "rocksdb_haskell.h rocksdb_haskell_options_set_merge_operator"
+  c_rocksdb_haskell_options_set_merge_operator ::
+    Options ->
+    CString ->
+    FunPtr FullMerge ->
+    FunPtr PartialMerge ->
+    IO CInt
+
+-- | Binding to @rocksdb_options_set_uint64add_merge_operator@.
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_uint64add_merge_operator"
+  c_rocksdb_options_set_uint64add_merge_operator :: Options -> IO ()
+
+--
+-- Flush
+--
+
+-- | Phantom type of the options of a flush.
+data LFlushOptions
+
+-- | Pointer to the options of a flush.
+type FlushOptions = Ptr LFlushOptions
+
+-- | Binding to @rocksdb_flushoptions_create@.
+foreign import ccall safe "rocksdb/c.h rocksdb_flushoptions_create"
+  c_rocksdb_flushoptions_create :: IO FlushOptions
+
+-- | Binding to @rocksdb_flushoptions_destroy@.
+foreign import ccall safe "rocksdb/c.h rocksdb_flushoptions_destroy"
+  c_rocksdb_flushoptions_destroy :: FlushOptions -> IO ()
+
+-- | Binding to @rocksdb_flushoptions_set_wait@.
+foreign import ccall safe "rocksdb/c.h rocksdb_flushoptions_set_wait"
+  c_rocksdb_flushoptions_set_wait :: FlushOptions -> CUChar -> IO ()
+
+-- | Binding to @rocksdb_flush@.
+foreign import ccall safe "rocksdb/c.h rocksdb_flush"
+  c_rocksdb_flush :: RocksDB -> FlushOptions -> ErrPtr -> IO ()
+
+-- | Binding to @rocksdb_flush_cf@.
+foreign import ccall safe "rocksdb/c.h rocksdb_flush_cf"
+  c_rocksdb_flush_cf :: RocksDB -> FlushOptions -> ColumnFamily -> ErrPtr -> IO ()
 
 --
 -- Options
@@ -675,6 +828,10 @@ foreign import ccall safe "rocksdb/c.h rocksdb_options_set_db_write_buffer_size"
 -- | Binding to @rocksdb_options_set_max_total_wal_size@.
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_max_total_wal_size"
   c_rocksdb_options_set_max_total_wal_size :: Options -> Word64 -> IO ()
+
+-- | Binding to @rocksdb_options_set_disable_auto_compactions@.
+foreign import ccall safe "rocksdb/c.h rocksdb_options_set_disable_auto_compactions"
+  c_rocksdb_options_set_disable_auto_compactions :: Options -> CInt -> IO ()
 
 -- | Binding to @rocksdb_options_set_max_background_jobs@.
 foreign import ccall safe "rocksdb/c.h rocksdb_options_set_max_background_jobs"

@@ -92,6 +92,7 @@ maintained as `rocksdb-haskell-jprupp`.
 | Basic access   | `get`, `put`, `delete` on strict `ByteString` keys and values                  |
 | Batches        | Atomic `write` of many puts and deletes, across column families                |
 | Packed batches | A batch of any size handed to RocksDB in a few foreign calls, from your buffers |
+| Merges         | Change a value without reading it: merge records, and a merge operator in C    |
 | Multi-get      | `multiGet` reads many keys in one call to RocksDB's `MultiGet`                 |
 | Column families| Open a database with several independent key spaces; add new ones on open     |
 | Snapshots      | Consistent point-in-time reads across many queries and iterators               |
@@ -104,10 +105,10 @@ maintained as `rocksdb-haskell-jprupp`.
 
 ### What is not included
 
-- No transactions (`TransactionDB`, `OptimisticTransactionDB`), merge
-  operators, TTL databases, backups or checkpoints. A packed batch can carry
-  merges, but there is no way yet to give a column family the merge operator
-  that they need.
+- No transactions (`TransactionDB`, `OptimisticTransactionDB`), TTL
+  databases, backups or checkpoints.
+- No merge operators written in Haskell: RocksDB calls a merge operator
+  from its own threads, so it is a C function.
 - No `DeleteRange` or `SingleDelete`.
 - No custom comparators: keys always sort by their bytes.
 
@@ -598,10 +599,9 @@ What to know:
   of a record.
 - **A chunk is only good here and now.** It holds column family handles,
   which are pointers of this process and of the open database.
-- **`PackedMerge` is for later.** A record can ask for a merge
-  (`rocksdb_writebatch_merge`), which needs a merge operator on the column
-  family, and this binding has no way to set one yet. RocksDB 11 refuses
-  such a batch when it is written.
+- **A record can be a merge.** `PackedMerge` adds a merge record, as
+  `Merge` does in a `BatchOp`, for a column family that has a merge
+  operator: see [Merge records](#merge-records-change-a-value-without-reading-it).
 
 The layout of a record, for a program that writes them by other means, is
 in `cbits/rocksdb_haskell.h`. It is this package's own format, and what a
@@ -630,6 +630,101 @@ With all 24 hardware threads of the machine free, the batch took `write`
 1,160 ms next to the busy threads, and 31 ms from packed chunks.
 
 Keep to `write` for small batches: it is as fast there, and simpler.
+
+### Merge records: change a value without reading it
+
+A put replaces the value of a key. A program that wants to change a value,
+to add to a counter or to add an entry to a list, has to read it first.
+For a batch of thousands of such changes those reads are most of the work,
+and each may wait for the disk.
+
+A **merge record** is a third kind of write, next to a put and a delete. It
+says how the value changes, not what it becomes: "add 5", "add this
+entry". RocksDB stores the record as it is and reads nothing.
+
+The work is done later by the **merge operator** of the column family: a
+function that takes the value that the key had and the records written
+since, oldest first, and gives the value that the key has now. RocksDB
+calls it when the key is read, and when a compaction brings the records
+and the value together. After that the key holds a plain value again.
+
+```haskell
+-- a column family of counters, with RocksDB's own operator for them
+let counters = def {mergeOperator = Just UInt64Add}
+withDBCF "/tmp/example-merge" def {createIfMissing = True} [("hits", counters)] $ \db -> do
+  let [hits] = columnFamilies db
+      five = BS.pack [5, 0, 0, 0, 0, 0, 0, 0] -- eight bytes, least significant first
+  mergeCF db hits "home" five -- no read
+  mergeCF db hits "home" five
+  getCF db hits "home" >>= print -- Just "\n\NUL\NUL\NUL\NUL\NUL\NUL\NUL": ten
+  write db [MergeCF hits "home" five, MergeCF hits "about" five]
+```
+
+What to know:
+
+- **Readers see values.** `get`, `multiGet` and iterators return merged
+  values, in a snapshot too. For a key with records pending they pay for
+  the merge, and for a look into each table file that holds one of the
+  records.
+- **A put or a delete hides the records before it**, like any older value.
+  A record written after a delete, or to a key that never had a value, is
+  merged with no value: the operator decides what that means.
+- **The operator is set when the database is opened**, with the
+  `mergeOperator` field of the `Config` of the column family. The one in
+  the `Config` of the database is for the default column family.
+- **`UInt64Add`** is RocksDB's own: values and records are unsigned 64-bit
+  numbers in eight bytes, least significant first, added modulo 2^64.
+- **`MergeFunctions`** makes an operator of a name and two C functions: one
+  that works out a value (the full merge), and one that makes a single
+  record of several (the partial merge), which RocksDB uses to shorten a
+  list of records before it has the value. They are C because RocksDB
+  calls them from its own threads, during reads, flushes and compactions.
+
+```c
+/* my_merge.c, listed under c-sources of your package */
+char *my_full_merge(void *state, const char *key, size_t key_length,
+                    const char *existing_value, size_t existing_value_length,
+                    const char *const *operands_list,
+                    const size_t *operands_list_length, int num_operands,
+                    unsigned char *success, size_t *new_value_length);
+char *my_partial_merge(void *state, const char *key, size_t key_length,
+                       const char *const *operands_list,
+                       const size_t *operands_list_length, int num_operands,
+                       unsigned char *success, size_t *new_value_length);
+```
+
+```haskell
+foreign import ccall "&my_full_merge" myFullMerge :: FunPtr FullMerge
+foreign import ccall "&my_partial_merge" myPartialMerge :: FunPtr PartialMerge
+
+mine :: Config
+mine = def {mergeOperator = Just (MergeFunctions "my-merge" myFullMerge myPartialMerge)}
+```
+
+A function returns the new bytes in memory from `malloc`, which RocksDB
+frees, with their length in `*new_value_length` and 1 in `*success`.
+`existing_value` is `NULL` when the key has no value. To fail, it stores 0
+in both and returns `NULL`: the read of that key then throws. A partial
+merge may always fail, and RocksDB then keeps the records as they are.
+`cbits/rocksdb_haskell.h` has the two types and the rules in full, and
+`test/cbits/merge_test.c` is a small operator to start from.
+
+**Every program that opens the database must set the same operator.**
+RocksDB opens a column family that has merge records without one, and
+this is what version 11.1 was seen to do then:
+
+| Where the merge records are | What happens without the operator                              |
+| --------------------------- | -------------------------------------------------------------- |
+| In the write-ahead log      | Dropped when the database is opened, without an error: lost    |
+| In table files              | Kept, also through a compaction, but they cannot be read       |
+| Read: records and no value  | `get` throws; an iterator stops there with an error            |
+| Read: records over a value  | `get` and `multiGet` crash the process                         |
+| Writing a merge record      | Refused with an error                                          |
+
+So when a program starts to write merge records to a database that older
+versions of it can open, make sure that they no longer can. A new column
+family is enough: RocksDB refuses to open a database without all its
+column families, and does so before it reads the write-ahead log.
 
 ### Properties and maintenance
 
@@ -664,8 +759,12 @@ yet, so in practice they are only usable from inside the library.
 | `prefixLength`                | column family   | Length of a fixed key prefix for the prefix extractor           |
 | `cacheIndexAndFilterBlocks`   | column family   | Keep index and filter blocks in the block cache                 |
 | `partitionIndexAndFilters`    | column family   | Write index and filter in 4 KiB pieces, loaded as needed        |
+| `mergeOperator`               | column family   | How merge records are combined with a value (default: none)     |
+| `disableAutoCompactions`      | column family   | No background compaction: for bulk loads, tests and benchmarks  |
 
 Database-wide fields are ignored in the configuration of a column family.
+The column family fields of the database's own `Config` are for its default
+column family.
 
 ### Choosing a configuration
 
@@ -703,8 +802,10 @@ every open file and every memtable can grow without bound.
 | Part                     | Contents                                                       |
 | ------------------------ | -------------------------------------------------------------- |
 | Types                    | `DB`, `Config`, `BatchOp`, `ColumnFamily`, `Snapshot`, `Iterator`, `Property`, `Range` |
+| Merge operators          | `MergeOperator`, `FullMerge`, `PartialMerge`                   |
 | Opening                  | `withDB`, `withDBCF`                                           |
 | Reading and writing      | `get`, `getCF`, `multiGet`, `multiGetCF`, `put`, `putCF`, `delete`, `deleteCF`, `write` |
+| Merging                  | `merge`, `mergeCF`, and `Merge`, `MergeCF` in a `BatchOp`      |
 | Packed batches           | `writePacked`, `packOps`, `PackedOp`, `packedHeaderSize`, `pokePackedHeader` |
 | Snapshots                | `withSnapshot`, `createSnapshot`, `releaseSnapshot`            |
 | Creating iterators       | `withIter`, `withIterCF`, `withIterSnap`, `withIterSnapCF`     |
@@ -714,10 +815,12 @@ every open file and every memtable can grow without bound.
 | Reading in chunks        | `iterChunk`, `ChunkConfig`                                     |
 | Reading a number of entries | `iterEntries`, `iterEntriesBack`, `iterEntriesPrefix`, `iterEntriesPrefixBack` |
 | Administration           | `getProperty`, `getPropertyCF`, `approximateSize`, `compactRange`, `destroy`, `repair` |
+| Flushing                 | `flush`                                                        |
 
 The FFI bindings (`Database.RocksDB.C`) and helpers (`Database.RocksDB.Internal`)
 are hidden modules. `cbits/rocksdb_haskell.c` is the one piece of C in the
-package: the functions behind `iterChunk` and `writePacked`.
+package: the functions behind `iterChunk` and `writePacked`, and the one
+that makes a merge operator of two functions.
 
 ## Things to watch out for
 
@@ -764,6 +867,14 @@ package: the functions behind `iterChunk` and `writePacked`.
 - An `iterChunk` with a `chunkPrefix` still moves the iterator to the first
   key outside the prefix, as a loop written by hand does. Where deleted keys
   follow the range, the iterator needs a bound as well.
+- A column family with merge records must get its `mergeOperator` from
+  every program that opens the database. Without it RocksDB drops the
+  records that are still in its write-ahead log, and a read of a key that
+  has a value under merge records crashes the process: see
+  [Merge records](#merge-records-change-a-value-without-reading-it).
+- A merge operator is called from RocksDB's threads, several at a time. It
+  must be a C function that keeps no state between calls, and must return
+  memory from `malloc`.
 - Releases before 2.6.2 built no Bloom filters on RocksDB 6.24 or later,
   whatever `bloomFilter` said: they passed the bits per key as an integer to a
   function that had come to take a `double`. A database written by one of them

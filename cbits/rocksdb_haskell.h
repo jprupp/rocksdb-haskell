@@ -17,7 +17,7 @@
 
 /* Results of the functions below. */
 #define ROCKSDB_HASKELL_OK 0
-/* of rocksdb_haskell_iter_chunk */
+/* of rocksdb_haskell_iter_chunk and rocksdb_haskell_options_set_merge_operator */
 #define ROCKSDB_HASKELL_NO_MEMORY 1
 /* of rocksdb_haskell_writebatch_add_packed */
 #define ROCKSDB_HASKELL_MALFORMED 2
@@ -145,5 +145,84 @@ int rocksdb_haskell_writebatch_add_packed(
     const char *records,
     size_t len,
     size_t *count);
+
+/*
+ * The two functions of a merge operator, with the types that
+ * rocksdb_mergeoperator_create of rocksdb/c.h asks for.
+ *
+ * The first argument of both is the state of the operator, which belongs
+ * to rocksdb_haskell_options_set_merge_operator: a function must not use
+ * it. "key" is the key that is merged, for an operator that needs it.
+ *
+ * A full merge works out the value of a key: from the value that the key
+ * has ("existing_value", which is NULL when it has none) and the
+ * "num_operands" merge records written since, oldest first, at
+ * "operands_list" with their lengths at "operands_list_length".
+ *
+ * A partial merge is given merge records only, oldest first, and makes one
+ * record of them that does to any value what they did one after another.
+ * RocksDB uses it to shorten the list before the value is known, when it
+ * compacts files that do not have it.
+ *
+ * Both return the new bytes in memory from malloc(), which RocksDB frees
+ * with free(), their length in "*new_value_length", and 1 in "*success".
+ * To fail, a function stores 0 in "*success" and in "*new_value_length",
+ * and returns NULL: RocksDB copies that many bytes from the result before
+ * it looks at "*success". A read of the key then fails, and so does a
+ * compaction that meets it. A partial merge that fails is not an error:
+ * RocksDB keeps the records as they are.
+ *
+ * They are called from the threads of RocksDB, during reads, flushes and
+ * compactions, several at a time. They must be plain C: a function that
+ * enters the Haskell run-time system from such a thread is not what this
+ * is for.
+ */
+typedef char *(*rocksdb_haskell_full_merge_t)(
+    void *state,
+    const char *key,
+    size_t key_length,
+    const char *existing_value,
+    size_t existing_value_length,
+    const char *const *operands_list,
+    const size_t *operands_list_length,
+    int num_operands,
+    unsigned char *success,
+    size_t *new_value_length);
+
+typedef char *(*rocksdb_haskell_partial_merge_t)(
+    void *state,
+    const char *key,
+    size_t key_length,
+    const char *const *operands_list,
+    const size_t *operands_list_length,
+    int num_operands,
+    unsigned char *success,
+    size_t *new_value_length);
+
+/*
+ * Give the options of a database or of a column family a merge operator
+ * made of a name and two functions.
+ *
+ * Why: rocksdb_mergeoperator_create wants a state with a destructor and a
+ * function that returns the name, besides the two that merge. A Haskell
+ * program has no C function to give for those, and should not make one
+ * that calls back into Haskell, since RocksDB calls them from its own
+ * threads. This function makes the operator around a copy of the name,
+ * which is all the state it has and is freed with the operator.
+ *
+ * The options own the operator from then on, and the column families
+ * opened with them keep it for as long as they need it: there is nothing
+ * for the caller to destroy. RocksDB frees what the two functions return
+ * with free(), since the operator is made without a function of its own
+ * for that.
+ *
+ * The result is ROCKSDB_HASKELL_OK, or ROCKSDB_HASKELL_NO_MEMORY with the
+ * options as they were.
+ */
+int rocksdb_haskell_options_set_merge_operator(
+    rocksdb_options_t *options,
+    const char *name,
+    rocksdb_haskell_full_merge_t full_merge,
+    rocksdb_haskell_partial_merge_t partial_merge);
 
 #endif

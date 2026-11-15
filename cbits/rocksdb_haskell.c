@@ -148,8 +148,10 @@ int rocksdb_haskell_iter_chunk(
          * The limit on bytes, which the first entry is exempt from. Since
          * entry_size did not overflow, neither does the sum of the lengths.
          * "bytes" is above "max_bytes" only after a first entry that was.
+         * At the limit exactly, an entry of no bytes is still read: it
+         * does not take the bytes read to more.
          */
-        if (read > 0 && (bytes >= max_bytes || key_len + value_len > max_bytes - bytes)) {
+        if (read > 0 && (bytes > max_bytes || key_len + value_len > max_bytes - bytes)) {
             break;
         }
         if (!reserve(&entries, &capacity, used, size)) {
@@ -332,5 +334,46 @@ int rocksdb_haskell_writebatch_add_packed(
         add_record(batch, &record);
     }
     *count = whole;
+    return ROCKSDB_HASKELL_OK;
+}
+
+/* The state of a merge operator is its name, which it owns. */
+static void merge_operator_destroy(void *state)
+{
+    free(state);
+}
+
+static const char *merge_operator_name(void *state)
+{
+    return state;
+}
+
+int rocksdb_haskell_options_set_merge_operator(
+    rocksdb_options_t *options,
+    const char *name,
+    rocksdb_haskell_full_merge_t full_merge,
+    rocksdb_haskell_partial_merge_t partial_merge)
+{
+    size_t size = strlen(name) + 1;
+    char *copy = malloc(size);
+    rocksdb_mergeoperator_t *merge_operator;
+
+    if (copy == NULL) {
+        return ROCKSDB_HASKELL_NO_MEMORY;
+    }
+    memcpy(copy, name, size);
+    /*
+     * No function to delete a value: RocksDB then frees with free() what
+     * the two functions return.
+     */
+    merge_operator = rocksdb_mergeoperator_create(
+        copy,
+        merge_operator_destroy,
+        full_merge,
+        partial_merge,
+        NULL,
+        merge_operator_name);
+    /* the options take the operator, and destroy it when nothing uses it */
+    rocksdb_options_set_merge_operator(options, merge_operator);
     return ROCKSDB_HASKELL_OK;
 }

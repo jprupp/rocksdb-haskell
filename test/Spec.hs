@@ -1,4 +1,6 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
 {-# LANGUAGE ImportQualifiedPost #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
 
@@ -28,6 +30,7 @@ import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception (bracket, evaluate, try)
 import Control.Monad
+import Data.Bits (shiftR)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as C
@@ -37,10 +40,10 @@ import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
-import Data.Word (Word8)
+import Data.Word (Word64, Word8)
 import Database.RocksDB
 import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Ptr (Ptr, castPtr, plusPtr)
+import Foreign.Ptr (FunPtr, Ptr, castPtr, plusPtr)
 import GHC.Clock (getMonotonicTime)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
@@ -60,6 +63,7 @@ main = hspec $ do
   around withPlainDB chunkSpec
   chunkErrorSpec
   packedSpec
+  mergeSpec
   boundSpec
   openingSpec
   tuningSpec
@@ -1032,12 +1036,11 @@ packedSpec = describe "Packed batches" $ do
     it "is refused when a delete has a value" $
       refused 1 (patch (size + operation) [1] chunk)
   describe "A merge" $ do
-    -- The binding cannot give a column family a merge operator, so what a
-    -- merge does to a value cannot be tested here. What can be: that the
-    -- record is taken for a merge and handed to RocksDB as one. RocksDB 11
-    -- says so itself, by refusing the batch for want of a merge operator. A
-    -- RocksDB that took such a batch would have a merge under the key, and
-    -- no way to read it.
+    -- What a merge does to a value is for the tests of merge records. Here:
+    -- that a packed record is taken for a merge and handed to RocksDB as
+    -- one. RocksDB 11 says so itself, by refusing the batch for want of a
+    -- merge operator. A RocksDB that took such a batch would have a merge
+    -- record under the key, and no way to read it.
     it "is handed to RocksDB as a merge, in the default column family and in another" $
       withTwoDBs $ \_ db -> do
         other <- firstFamily db
@@ -1052,6 +1055,279 @@ packedSpec = describe "Packed batches" $ do
                 Right () -> reading `shouldThrow` anyIOException
         asMerge [packOps [Put "a" "1"], record Nothing PackedMerge "k" "v"] (get db "k")
         asMerge [record (Just other) PackedMerge "k" "v", packOps [Put "a" "1"]] (getCF db other "k")
+        record Nothing PackedMerge "k" "v" `shouldBe` packOps [Merge "k" "v"]
+        record (Just other) PackedMerge "k" "v" `shouldBe` packOps [MergeCF other "k" "v"]
+
+-------------------------------------------------------------------------------
+-- Merge records and merge operators
+-------------------------------------------------------------------------------
+
+-- The merge operator of the tests, in @test\/cbits\/merge_test.c@: the
+-- value of a key is the value it had and its merge records, oldest first,
+-- joined with commas. The value shows which records were merged and in
+-- which order, which a sum would not.
+foreign import ccall "&rocksdb_haskell_test_join_full" joinFull :: FunPtr FullMerge
+
+foreign import ccall "&rocksdb_haskell_test_join_partial" joinPartial :: FunPtr PartialMerge
+
+foreign import ccall "&rocksdb_haskell_test_no_partial" noPartial :: FunPtr PartialMerge
+
+-- | Join with commas.
+joining :: MergeOperator
+joining = MergeFunctions {mergeName = "test-join", fullMerge = joinFull, partialMerge = joinPartial}
+
+-- | Join with commas, with a partial merge that always fails: RocksDB has
+-- to keep every record until it has the value under them.
+joiningWhole :: MergeOperator
+joiningWhole = MergeFunctions {mergeName = "test-join-whole", fullMerge = joinFull, partialMerge = noPartial}
+
+-- | A number as RocksDB's own operator for counters reads and writes it:
+-- eight bytes, the least significant first.
+counter :: Word64 -> ByteString
+counter n = BS.pack [fromIntegral (n `shiftR` (8 * i)) | i <- [0 .. 7]]
+
+-- | The configuration of a column family, or of the database, with a merge
+-- operator. Nothing is compacted behind the back of a test, so that each
+-- flush leaves a table file of its own and merge records stay where they
+-- were written until the test compacts.
+merging :: Maybe MergeOperator -> Config
+merging op = plain {createMissingColumnFamilies = True, mergeOperator = op, disableAutoCompactions = True}
+
+-- | The families of 'withMergeDB' besides the default.
+mergeFamilies :: [(String, Config)]
+mergeFamilies =
+  [ ("count", merging (Just UInt64Add)),
+    ("whole", merging (Just joiningWhole)),
+    ("none", merging Nothing)
+  ]
+
+-- | A database whose default column family joins with commas, with three
+-- more: one that counts, one that joins and cannot merge records without
+-- the value, and one without a merge operator.
+withMergeDB :: (DB -> ColumnFamily -> ColumnFamily -> ColumnFamily -> IO a) -> IO a
+withMergeDB go = withTempPath $ \path -> openMergeDB path go
+
+openMergeDB :: FilePath -> (DB -> ColumnFamily -> ColumnFamily -> ColumnFamily -> IO a) -> IO a
+openMergeDB path go =
+  withDBCF path (merging (Just joining)) mergeFamilies $ \db -> case columnFamilies db of
+    [count, whole, none] -> go db count whole none
+    cfs -> fail ("expected three column families, got " <> show (length cfs))
+
+-- | Flush every column family of a database.
+flushAll :: DB -> IO ()
+flushAll db = flush db Nothing >> mapM_ (flush db . Just) (columnFamilies db)
+
+-- | Compact every column family of a database, to its last level.
+compactAll :: DB -> IO ()
+compactAll db = do
+  compactRange db Nothing Nothing Nothing
+  forM_ (columnFamilies db) $ \cf -> compactRange db (Just cf) Nothing Nothing
+
+-- | A merge record says how a value changes, and the merge operator of the
+-- column family works out the value when it is read or compacted. What can
+-- go wrong is the order of the records, what a put or a delete among them
+-- hides, and a value that depends on where its parts happen to be: in the
+-- memtable, in several table files, or compacted into one.
+mergeSpec :: Spec
+mergeSpec = describe "Merge records" $ do
+  it "adds to a counter, from zero where the key has no value" $
+    withMergeDB $ \db count _ _ -> do
+      mergeCF db count "k" (counter 5)
+      getCF db count "k" `shouldReturn` Just (counter 5)
+      mergeCF db count "k" (counter 7)
+      getCF db count "k" `shouldReturn` Just (counter 12)
+      putCF db count "set" (counter 100)
+      mergeCF db count "set" (counter 1)
+      getCF db count "set" `shouldReturn` Just (counter 101)
+      -- modulo 2^64, so a record can take away as well
+      mergeCF db count "set" (counter (negate 101))
+      getCF db count "set" `shouldReturn` Just (counter 0)
+      getCF db count "absent" `shouldReturn` Nothing
+  it "gives a custom operator the value and the records, oldest first" $
+    withMergeDB $ \db _ _ _ -> do
+      merge db "new" "a"
+      get db "new" `shouldReturn` Just "a"
+      merge db "new" "b"
+      merge db "new" "c"
+      get db "new" `shouldReturn` Just "a,b,c"
+      put db "old" "x"
+      merge db "old" "y"
+      get db "old" `shouldReturn` Just "x,y"
+      -- a value of no bytes is a value, and a record of no bytes a record
+      put db "empty" ""
+      merge db "empty" ""
+      get db "empty" `shouldReturn` Just ","
+  it "hides the records before a put or a delete, and applies those after" $
+    withMergeDB $ \db _ _ _ -> do
+      merge db "put" "a" >> put db "put" "x" >> merge db "put" "b"
+      get db "put" `shouldReturn` Just "x,b"
+      merge db "del" "a" >> delete db "del"
+      get db "del" `shouldReturn` Nothing
+      merge db "del" "b"
+      get db "del" `shouldReturn` Just "b"
+      put db "last" "x" >> merge db "last" "a" >> delete db "last"
+      get db "last" `shouldReturn` Nothing
+      -- and the same when each write is in a table file of its own
+      forM_ [merge db "files" "a", put db "files" "x", merge db "files" "b", delete db "files", merge db "files" "c"] $
+        \step -> step >> flush db Nothing
+      get db "files" `shouldReturn` Just "c"
+      merge db "files" "d"
+      get db "files" `shouldReturn` Just "c,d"
+  it "takes merges in a batch, among puts and deletes, written either way" $ do
+    let ops count whole =
+          [ Put "a" "1",
+            Merge "a" "2",
+            MergeCF count "n" (counter 3),
+            Merge "b" "x",
+            MergeCF whole "a" "w",
+            Merge "a" "3",
+            MergeCF count "n" (counter 4),
+            Put "gone" "v",
+            Merge "gone" "w",
+            Del "gone",
+            MergeCF whole "a" "v"
+          ]
+        wanted = [[("a", "1,2,3"), ("b", "x")], [("n", counter 7)], [("a", "w,v")], []]
+    withMergeDB $ \db count whole _ -> do
+      write db (ops count whole)
+      contents db `shouldReturn` wanted
+    withMergeDB $ \db count whole _ -> do
+      writePacked db [packOps (ops count whole)]
+      contents db `shouldReturn` wanted
+    withMergeDB $ \db count whole _ -> do
+      writePacked db (map packOps (groupsOf 2 (ops count whole)))
+      contents db `shouldReturn` wanted
+  it "gives the same values from the memtable, from table files and after a compaction" $
+    withMergeDB $ \db count whole _ -> do
+      let keys = ["both", "records", "value"] :: [ByteString]
+          wanted =
+            [ [("both", "x,a,b,c"), ("records", "a,b,c"), ("value", "x")],
+              [("both", counter 16), ("records", counter 6), ("value", counter 10)],
+              [("both", "x,a,b,c"), ("records", "a,b,c"), ("value", "x")],
+              []
+            ]
+          -- every way of reading, in every family
+          agree = do
+            contents db `shouldReturn` wanted
+            forM_ (zip (Nothing : map Just (columnFamilies db)) wanted) $ \(mcf, entries) -> do
+              let values = map (`lookup` entries) keys
+              case mcf of
+                Nothing -> do
+                  mapM (get db) keys `shouldReturn` values
+                  multiGet db keys `shouldReturn` values
+                  withIter db backwards `shouldReturn` reverse entries
+                  withIter db (\itr -> iterFirst itr >> iterEntries itr 10) `shouldReturn` entries
+                Just cf -> do
+                  mapM (getCF db cf) keys `shouldReturn` values
+                  multiGetCF db cf keys `shouldReturn` values
+                  withIterCF db cf backwards `shouldReturn` reverse entries
+                  withIterCF db cf (\itr -> iterFirst itr >> iterEntries itr 10) `shouldReturn` entries
+          each k v n = do
+            merge db k v
+            mergeCF db whole k v
+            mergeCF db count k (counter n)
+      forM_ ["both", "value"] $ \k -> do
+        put db k "x"
+        putCF db whole k "x"
+        putCF db count k (counter 10)
+      flushAll db
+      forM_ [("a", 1), ("b", 2)] $ \(v, n) -> do
+        each "both" v n
+        each "records" v n
+        flushAll db
+      -- the last record of each key is in the memtable, the others in a
+      -- table file each, and the value in another
+      each "both" "c" 3
+      each "records" "c" 3
+      agree
+      withSnapshot db $ \snap -> do
+        merge db "both" "later"
+        get snap "both" `shouldReturn` Just "x,a,b,c"
+        delete db "both" >> put db "both" "x,a,b,c"
+      flushAll db
+      agree
+      compactAll db
+      agree
+      -- and what is merged after the compaction is merged with its result
+      each "both" "d" 4
+      get db "both" `shouldReturn` Just "x,a,b,c,d"
+      getCF db whole "both" `shouldReturn` Just "x,a,b,c,d"
+      getCF db count "both" `shouldReturn` Just (counter 20)
+  it "keeps its values when the database is closed and opened again" $
+    withTempPath $ \path -> do
+      openMergeDB path $ \db count whole _ -> do
+        put db "k" "x" >> merge db "k" "a"
+        flushAll db
+        -- these are in the write-ahead log only
+        merge db "k" "b"
+        mergeCF db count "n" (counter 2)
+        mergeCF db whole "k" "w"
+      openMergeDB path $ \db _ _ _ ->
+        contents db `shouldReturn` [[("k", "x,a,b")], [("n", counter 2)], [("k", "w")], []]
+  it "throws at the read of a key whose merge fails, and at no other" $
+    withMergeDB $ \db _ _ _ -> do
+      merge db "bad" "a" >> merge db "bad" "!" >> merge db "bad" "b"
+      put db "good" "x" >> merge db "good" "y"
+      get db "bad" `shouldThrow` anyIOException
+      get db "good" `shouldReturn` Just "x,y"
+      withIter db (\itr -> iterFirst itr >> iterEntries itr 10) `shouldThrow` anyIOException
+      -- a put hides the record that cannot be merged
+      put db "bad" "mended"
+      get db "bad" `shouldReturn` Just "mended"
+      withIter db forwards `shouldReturn` [("bad", "mended"), ("good", "x,y")]
+  it "refuses a merge in a column family that has no merge operator" $
+    withMergeDB $ \db _ _ none -> do
+      mergeCF db none "k" "v" `shouldThrow` anyIOException
+      write db [Put "a" "1", MergeCF none "k" "v"] `shouldThrow` anyIOException
+      writePacked db [packOps [Put "a" "1", MergeCF none "k" "v"]] `shouldThrow` anyIOException
+      contents db `shouldReturn` [[], [], [], []]
+  -- A database is opened without the merge operator that its records need
+  -- by a program that does not know of them. RocksDB opens it all the
+  -- same. This is what RocksDB 11 does with records that are in table
+  -- files, as far as it can be tried: a read of a key that has a value
+  -- under its records, with 'get' or 'multiGet', crashes the process.
+  it "cannot read merge records in table files without their operator, and keeps them" $
+    withTempPath $ \path -> do
+      let without = [(name, cfg {mergeOperator = Nothing}) | (name, cfg) <- mergeFamilies]
+      openMergeDB path $ \db _ _ _ -> do
+        put db "plain" "x"
+        merge db "records" "a" >> merge db "records" "b"
+        flushAll db
+      withDBCF path (merging Nothing) without $ \db -> do
+        get db "plain" `shouldReturn` Just "x"
+        get db "records" `shouldThrow` anyIOException
+        withIter db (\itr -> iterFirst itr >> iterEntries itr 10) `shouldThrow` anyIOException
+        merge db "records" "c" `shouldThrow` anyIOException
+        -- it can still be written, flushed and compacted
+        put db "more" "y"
+        flushAll db
+        compactAll db
+      openMergeDB path $ \db _ _ _ ->
+        withIter db forwards `shouldReturn` [("more", "y"), ("plain", "x"), ("records", "a,b")]
+  -- Records that are still in the write-ahead log fare worse. RocksDB 11
+  -- drops them when it opens the database without the operator, and says
+  -- nothing: they are lost for the program that has the operator too. It
+  -- refuses to open a database without all its column families, and does
+  -- so before it reads the log: a column family that the other program
+  -- does not know of keeps the records safe.
+  it "loses the merge records of the log to an open without their operator, unless the open is refused" $ do
+    let without = [(name, cfg {mergeOperator = Nothing}) | (name, cfg) <- mergeFamilies]
+        -- a value in a table file, and merge records that are in the log
+        -- and in no table file when the database is closed
+        records path = openMergeDB path $ \db _ _ _ -> do
+          put db "value" "x"
+          flush db Nothing
+          merge db "value" "a" >> merge db "new" "b"
+    withTempPath $ \path -> do
+      records path
+      withDBCF path (merging Nothing) without $ \_ -> return ()
+      openMergeDB path $ \db _ _ _ ->
+        withIter db forwards `shouldReturn` [("value", "x")]
+    withTempPath $ \path -> do
+      records path
+      withDBCF path (merging Nothing) (take 2 without) (\_ -> return ()) `shouldThrow` anyIOException
+      openMergeDB path $ \db _ _ _ ->
+        withIter db forwards `shouldReturn` [("new", "b"), ("value", "x,a")]
 
 -------------------------------------------------------------------------------
 -- Opening and closing
@@ -1330,6 +1606,43 @@ opKey :: Op -> ByteString
 opKey (Set k _) = k
 opKey (Unset k) = k
 
+-- | A step of a history with merge records: a write, a merge record for the
+-- operator that joins with commas, or a flush of the memtable to a table
+-- file of its own.
+data Step
+  = Write Op
+  | Join ByteString ByteString
+  | Flush
+  deriving (Show)
+
+stepKey :: Step -> Maybe ByteString
+stepKey (Write op) = Just (opKey op)
+stepKey (Join k _) = Just k
+stepKey Flush = Nothing
+
+-- | Histories in which keys often have several merge records, with puts,
+-- deletes and flushes among them. The records are letters: the one byte
+-- that makes the operator of the tests fail is not among them.
+genMergeOps :: Gen [Step]
+genMergeOps =
+  listOf . frequency $
+    [ (2, Write <$> (Set <$> genKey <*> genValue)),
+      (1, Write . Unset <$> genKey),
+      (5, Join <$> genKey <*> (BS.pack <$> listOf (elements [97 .. 122]))),
+      (2, return Flush)
+    ]
+
+-- | What the database should hold after a history, with the operator that
+-- joins with commas: a record on a key without a value is the value, and
+-- on a key with one it follows a comma.
+joinModel :: [Step] -> Map ByteString ByteString
+joinModel = foldl apply Map.empty
+  where
+    apply m (Write (Set k v)) = Map.insert k v m
+    apply m (Write (Unset k)) = Map.delete k m
+    apply m (Join k v) = Map.insertWith (\new old -> old <> "," <> new) k v m
+    apply m Flush = m
+
 -- | What the database should hold after the operations, in order.
 model :: [Op] -> Map ByteString ByteString
 model = foldl apply Map.empty
@@ -1379,6 +1692,35 @@ modelSpec = describe "Agreement with a Map" $ do
     forAllOps $ \ops -> forAll (choose (1, 5)) $ \size -> inNewDB $ \db -> do
       writePacked db (map packOps (groupsOf size (batchOf ops)))
       shouldHold db (map opKey ops) (model ops)
+  prop "with merge records among the writes, in memtables, in table files and compacted" $
+    forAll genMergeOps $ \steps -> ioProperty $ withTempPath $ \path ->
+      withDB path (merging (Just joining)) $ \db -> do
+        let keys = [k | Just k <- map stepKey steps]
+            wanted = joinModel steps
+        forM_ steps $ \case
+          Write (Set k v) -> put db k v
+          Write (Unset k) -> delete db k
+          Join k v -> merge db k v
+          Flush -> flush db Nothing
+        shouldHold db keys wanted
+        flush db Nothing
+        shouldHold db keys wanted
+        compactRange db Nothing Nothing Nothing
+        shouldHold db keys wanted
+  prop "with merge records in one batch, plain or packed" $
+    forAll genMergeOps $ \steps -> forAll arbitrary $ \packed -> ioProperty $ withTempPath $ \path ->
+      withDB path (merging (Just joining)) $ \db -> do
+        let batch =
+              [ op
+              | step <- steps,
+                op <- case step of
+                  Write (Set k v) -> [Put k v]
+                  Write (Unset k) -> [Del k]
+                  Join k v -> [Merge k v]
+                  Flush -> []
+              ]
+        if packed then writePacked db (map packOps (groupsOf 3 batch)) else write db batch
+        shouldHold db [k | Just k <- map stepKey steps] (joinModel steps)
   prop "after the database is closed and opened again" $
     forAllOps $ \ops -> ioProperty $ withTempPath $ \path -> do
       withDB path plain $ \db -> runOps db ops
