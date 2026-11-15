@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards #-}
+
 -- |
 -- Module      : Database.RocksDB.Internal
 -- Copyright   : (c) 2012-2013 The leveldb-haskell Authors
@@ -11,61 +12,62 @@
 -- Internal types and helpers shared by the other modules. The t'DB' and t'Config'
 -- types are re-exported by "Database.RocksDB"; everything else is an
 -- implementation detail.
-
 module Database.RocksDB.Internal
-    ( Config (..)
-    , DB (..)
+  ( Config (..),
+    DB (..),
 
     -- * Smart constructors & extractors
-    , withOptions
-    , withOptionsCache
-    , withOptionsCF
-    , withOptionsCFCache
-    , withBlockCache
-    , withReadOpts
-    , createReadOpts
-    , destroyReadOpts
-    , withWriteOpts
+    withOptions,
+    withOptionsCache,
+    withOptionsCF,
+    withOptionsCFCache,
+    withBlockCache,
+    withReadOpts,
+    createReadOpts,
+    destroyReadOpts,
+    withWriteOpts,
 
     -- * Utilities
-    , freeCString
-    , throwIfErr
-    , cSizeToInt
-    , intToCSize
-    , intToCInt
-    , cIntToInt
-    , boolToNum
-    ) where
+    freeCString,
+    throwIfErr,
+    cSizeToInt,
+    intToCSize,
+    intToCInt,
+    cIntToInt,
+    boolToNum,
+  )
+where
 
-import           Control.Exception
-import           Control.Monad
-import           Data.Default
-import           Data.Maybe        (isJust)
-import           Database.RocksDB.C
-import           Foreign
-import           Foreign.C.String
-import           Foreign.C.Types
+import Control.Exception
+import Control.Monad
+import Data.Default
+import Data.Maybe (isJust)
+import Database.RocksDB.C
+import Foreign
+import Foreign.C.String
+import Foreign.C.Types
 
 -- | Handle to an open database. Obtain one with 'Database.RocksDB.withDB' or
 -- 'Database.RocksDB.withDBCF'. It is only valid inside the function passed to
 -- those, and can be shared between threads.
-data DB = DB { rocksDB        :: !RocksDB
-               -- ^ pointer to the C database object
-             , columnFamilies :: ![ColumnFamily]
-               -- ^ handles of the column families opened with
-               -- 'Database.RocksDB.withDBCF', in the order they were given;
-               -- empty for 'Database.RocksDB.withDB'
-             , readOpts       :: !ReadOpts
-               -- ^ read options used by reads and iterators; set to read from
-               -- a snapshot by 'Database.RocksDB.withSnapshot'
-             , snapshot       :: !(Maybe Snapshot)
-               -- ^ the snapshot that 'readOpts' read from, if any. RocksDB
-               -- cannot be asked what snapshot its read options hold, and
-               -- 'Database.RocksDB.withIterConfig' has to make read options
-               -- of its own that read from the same one.
-             , writeOpts      :: !WriteOpts
-               -- ^ write options used by all writes
-             }
+data DB = DB
+  { -- | pointer to the C database object
+    rocksDB :: !RocksDB,
+    -- | handles of the column families opened with
+    -- 'Database.RocksDB.withDBCF', in the order they were given;
+    -- empty for 'Database.RocksDB.withDB'
+    columnFamilies :: ![ColumnFamily],
+    -- | read options used by reads and iterators; set to read from
+    -- a snapshot by 'Database.RocksDB.withSnapshot'
+    readOpts :: !ReadOpts,
+    -- | the snapshot that 'readOpts' read from, if any. RocksDB
+    -- cannot be asked what snapshot its read options hold, and
+    -- 'Database.RocksDB.withIterConfig' has to make read options
+    -- of its own that read from the same one.
+    snapshot :: !(Maybe Snapshot),
+    -- | write options used by all writes
+    writeOpts :: !WriteOpts
+  }
 
 -- | Configuration of a database or column family. Use 'def' for the defaults
 -- and override the fields you need:
@@ -83,68 +85,85 @@ data DB = DB { rocksDB        :: !RocksDB
 -- database these grow without bound. Setting 'maxFiles', 'blockCacheSize',
 -- 'cacheIndexAndFilterBlocks' and 'dbWriteBufferSize' turns that into a fixed
 -- budget.
-data Config = Config { createIfMissing :: !Bool
-                       -- ^ create the database if it does not exist
-                     , errorIfExists   :: !Bool
-                       -- ^ fail to open if the database already exists
-                     , paranoidChecks  :: !Bool
-                       -- ^ check data aggressively and stop early on any
-                       -- corruption
-                     , createMissingColumnFamilies :: !Bool
-                       -- ^ create the column families passed to
-                       -- 'Database.RocksDB.withDBCF' that an existing
-                       -- database does not have yet
-                     , maxFiles        :: !(Maybe Int)
-                       -- ^ maximum number of files RocksDB keeps open
-                       -- ('Nothing': RocksDB default, unlimited)
-                     , prefixLength    :: !(Maybe Int)
-                       -- ^ length in bytes of a fixed key prefix, used by
-                       -- bloom filters and prefix seeks
-                     , bloomFilter     :: !Bool
-                       -- ^ use a full bloom filter with 10 bits per key to
-                       -- skip files that cannot contain a key; the filters
-                       -- take about 1.25 bytes of memory per key
-                     , writeBufferSize :: !(Maybe Int)
-                       -- ^ bytes per memtable (RocksDB default 64 MiB);
-                       -- per column family
-                     , dbWriteBufferSize :: !(Maybe Int)
-                       -- ^ bytes for all memtables across all column
-                       -- families (RocksDB default unlimited); database-wide,
-                       -- ignored in column family configs
-                     , blockCacheSize :: !(Maybe Int)
-                       -- ^ bytes of a least-recently-used block cache shared
-                       -- by the database and all its column families
-                       -- ('Nothing': RocksDB gives each column family its
-                       -- own default cache, of 32 MiB in RocksDB 8);
-                       -- database-wide, ignored in column family configs
-                     , cacheIndexAndFilterBlocks :: !Bool
-                       -- ^ keep index and filter blocks in the block cache,
-                       -- at high priority, with those of level 0 pinned,
-                       -- instead of in memory outside it for every open
-                       -- file; per column family
-                     , maxTotalWalSize :: !(Maybe Int)
-                       -- ^ bytes of write-ahead log after which the column
-                       -- families holding the oldest log are flushed, so it
-                       -- can be deleted (RocksDB default: four times the
-                       -- memtables); database-wide, ignored in column family
-                       -- configs
-                     } deriving (Eq, Show)
+data Config = Config
+  { -- | create the database if it does not exist
+    createIfMissing :: !Bool,
+    -- | fail to open if the database already exists
+    errorIfExists :: !Bool,
+    -- | check data aggressively and stop early on any
+    -- corruption
+    paranoidChecks :: !Bool,
+    -- | create the column families passed to
+    -- 'Database.RocksDB.withDBCF' that an existing
+    -- database does not have yet
+    createMissingColumnFamilies :: !Bool,
+    -- | maximum number of files RocksDB keeps open
+    -- ('Nothing': RocksDB default, unlimited)
+    maxFiles :: !(Maybe Int),
+    -- | length in bytes of a fixed key prefix, used by
+    -- bloom filters and prefix seeks
+    prefixLength :: !(Maybe Int),
+    -- | use a full bloom filter with 10 bits per key to
+    -- skip files that cannot contain a key; the filters
+    -- take about 1.25 bytes of memory per key
+    bloomFilter :: !Bool,
+    -- | bytes per memtable (RocksDB default 64 MiB);
+    -- per column family
+    writeBufferSize :: !(Maybe Int),
+    -- | bytes for all memtables across all column
+    -- families (RocksDB default unlimited); database-wide,
+    -- ignored in column family configs
+    dbWriteBufferSize :: !(Maybe Int),
+    -- | bytes of a least-recently-used block cache shared
+    -- by the database and all its column families
+    -- ('Nothing': RocksDB gives each column family its
+    -- own default cache, of 32 MiB in RocksDB 8);
+    -- database-wide, ignored in column family configs
+    blockCacheSize :: !(Maybe Int),
+    -- | keep index and filter blocks in the block cache,
+    -- at high priority, with those of level 0 pinned,
+    -- instead of in memory outside it for every open
+    -- file; per column family
+    cacheIndexAndFilterBlocks :: !Bool,
+    -- | bytes of write-ahead log after which the column
+    -- families holding the oldest log are flushed, so it
+    -- can be deleted (RocksDB default: four times the
+    -- memtables); database-wide, ignored in column family
+    -- configs
+    maxTotalWalSize :: !(Maybe Int),
+    -- | threads that RocksDB may use at once to flush
+    -- memtables and to compact files (RocksDB default 2:
+    -- one flush and one compaction). Of @n@ jobs, a
+    -- quarter are for flushes and the rest for
+    -- compactions, at least one of each. More of them
+    -- shorten a backlog of compactions on a disk and
+    -- cores that have room for it, and take both from
+    -- reads when they have not: on a slow disk a single
+    -- compaction already waits for the disk, and a
+    -- second one only makes every read wait longer.
+    -- Database-wide, ignored in column family configs
+    maxBackgroundJobs :: !(Maybe Int)
+  }
+  deriving (Eq, Show)
 
 -- | All flags off and all sizes left to RocksDB defaults.
 instance Default Config where
-    def = Config { createIfMissing  = False
-                 , errorIfExists    = False
-                 , paranoidChecks   = False
-                 , createMissingColumnFamilies = False
-                 , maxFiles         = Nothing
-                 , prefixLength     = Nothing
-                 , bloomFilter      = False
-                 , writeBufferSize  = Nothing
-                 , dbWriteBufferSize = Nothing
-                 , blockCacheSize   = Nothing
-                 , cacheIndexAndFilterBlocks = False
-                 , maxTotalWalSize  = Nothing
-                 }
+  def =
+    Config
+      { createIfMissing = False,
+        errorIfExists = False,
+        paranoidChecks = False,
+        createMissingColumnFamilies = False,
+        maxFiles = Nothing,
+        prefixLength = Nothing,
+        bloomFilter = False,
+        writeBufferSize = Nothing,
+        dbWriteBufferSize = Nothing,
+        blockCacheSize = Nothing,
+        cacheIndexAndFilterBlocks = False,
+        maxTotalWalSize = Nothing,
+        maxBackgroundJobs = Nothing
+      }
 
 -- | Create RocksDB options from a t'Config' and pass them to a function. The
 -- options are destroyed when it returns.
@@ -155,45 +174,52 @@ withOptions = withOptionsCache Nothing
 -- any. The options are destroyed when the function returns.
 withOptionsCache :: Maybe Cache -> Config -> (Options -> IO a) -> IO a
 withOptionsCache cache Config {..} f = with_opts $ \opts -> do
-    when (bloomFilter || isJust cache || cacheIndexAndFilterBlocks) $
-        bracket c_rocksdb_block_based_options_create
-                c_rocksdb_block_based_options_destroy $ \bo -> do
-            when bloomFilter $ do
-                fp <- c_rocksdb_filterpolicy_create_bloom_full 10
-                c_rocksdb_block_based_options_set_filter_policy bo fp
-            forM_ cache $ c_rocksdb_block_based_options_set_block_cache bo
-            when cacheIndexAndFilterBlocks $ do
-                c_rocksdb_block_based_options_set_cache_index_and_filter_blocks bo 1
-                c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority bo 1
-                c_rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache bo 1
-            -- the table factory copies the options, filter policy and cache
-            c_rocksdb_options_set_block_based_table_factory opts bo
-    forM_ prefixLength $ \l -> do
-        t <- c_rocksdb_slicetransform_create_fixed_prefix (intToCSize l)
-        c_rocksdb_options_set_prefix_extractor opts t
-    forM_ maxFiles $
-        c_rocksdb_options_set_max_open_files opts . intToCInt
-    forM_ writeBufferSize $
-        c_rocksdb_options_set_write_buffer_size opts . intToCSize
-    forM_ dbWriteBufferSize $
-        c_rocksdb_options_set_db_write_buffer_size opts . intToCSize
-    forM_ maxTotalWalSize $
-        c_rocksdb_options_set_max_total_wal_size opts . fromIntegral
-    c_rocksdb_options_set_create_if_missing
-        opts (boolToCBool createIfMissing)
-    c_rocksdb_options_set_error_if_exists
-        opts (boolToCBool errorIfExists)
-    c_rocksdb_options_set_paranoid_checks
-        opts (boolToCBool paranoidChecks)
-    c_rocksdb_options_set_create_missing_column_families
-        opts (boolToCBool createMissingColumnFamilies)
-    f opts
+  when (bloomFilter || isJust cache || cacheIndexAndFilterBlocks)
+    $ bracket
+      c_rocksdb_block_based_options_create
+      c_rocksdb_block_based_options_destroy
+    $ \bo -> do
+      when bloomFilter $ do
+        fp <- c_rocksdb_filterpolicy_create_bloom_full 10
+        c_rocksdb_block_based_options_set_filter_policy bo fp
+      forM_ cache $ c_rocksdb_block_based_options_set_block_cache bo
+      when cacheIndexAndFilterBlocks $ do
+        c_rocksdb_block_based_options_set_cache_index_and_filter_blocks bo 1
+        c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority bo 1
+        c_rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache bo 1
+      -- the table factory copies the options, filter policy and cache
+      c_rocksdb_options_set_block_based_table_factory opts bo
+  forM_ prefixLength $ \l -> do
+    t <- c_rocksdb_slicetransform_create_fixed_prefix (intToCSize l)
+    c_rocksdb_options_set_prefix_extractor opts t
+  forM_ maxFiles $
+    c_rocksdb_options_set_max_open_files opts . intToCInt
+  forM_ writeBufferSize $
+    c_rocksdb_options_set_write_buffer_size opts . intToCSize
+  forM_ dbWriteBufferSize $
+    c_rocksdb_options_set_db_write_buffer_size opts . intToCSize
+  forM_ maxTotalWalSize $
+    c_rocksdb_options_set_max_total_wal_size opts . fromIntegral
+  forM_ maxBackgroundJobs $
+    c_rocksdb_options_set_max_background_jobs opts . intToCInt
+  c_rocksdb_options_set_create_if_missing
+    opts
+    (boolToCBool createIfMissing)
+  c_rocksdb_options_set_error_if_exists
+    opts
+    (boolToCBool errorIfExists)
+  c_rocksdb_options_set_paranoid_checks
+    opts
+    (boolToCBool paranoidChecks)
+  c_rocksdb_options_set_create_missing_column_families
+    opts
+    (boolToCBool createMissingColumnFamilies)
+  f opts
   where
     with_opts =
-        bracket
+      bracket
         c_rocksdb_options_create
         c_rocksdb_options_destroy
-
 
 -- | Create options for several column families at once, in the same order as
 -- the configurations.
@@ -203,10 +229,10 @@ withOptionsCF = withOptionsCFCache Nothing
 -- | Options of column families that use this block cache, if any.
 withOptionsCFCache :: Maybe Cache -> [Config] -> ([Options] -> IO a) -> IO a
 withOptionsCFCache cache cfgs f =
-    go [] cfgs
+  go [] cfgs
   where
     go acc [] = f (reverse acc)
-    go acc (c:cs) = withOptionsCache cache c $ \o -> go (o:acc) cs
+    go acc (c : cs) = withOptionsCache cache c $ \o -> go (o : acc) cs
 
 -- | The block cache of 'blockCacheSize', if it is set. The database and
 -- column families that use it keep it alive after this returns.
@@ -216,15 +242,16 @@ withOptionsCFCache cache cfgs f =
 withBlockCache :: Config -> (Maybe Cache -> IO a) -> IO a
 withBlockCache Config {blockCacheSize = Nothing} f = f Nothing
 withBlockCache Config {blockCacheSize = Just n} f =
-    bracket (c_rocksdb_cache_create_lru (intToCSize n))
-            c_rocksdb_cache_destroy
-            (f . Just)
+  bracket
+    (c_rocksdb_cache_create_lru (intToCSize n))
+    c_rocksdb_cache_destroy
+    (f . Just)
 
 -- | Create read options, reading from a snapshot if one is given, and pass them
 -- to a function. They are destroyed when it returns.
 withReadOpts :: Maybe Snapshot -> (ReadOpts -> IO a) -> IO a
 withReadOpts maybe_snap_ptr =
-    bracket
+  bracket
     (createReadOpts maybe_snap_ptr)
     c_rocksdb_readoptions_destroy
 
@@ -232,9 +259,9 @@ withReadOpts maybe_snap_ptr =
 -- Caller is responsible for calling 'destroyReadOpts'.
 createReadOpts :: Maybe Snapshot -> IO ReadOpts
 createReadOpts maybe_snap_ptr = do
-    read_opts_ptr <- c_rocksdb_readoptions_create
-    forM_ maybe_snap_ptr $ c_rocksdb_readoptions_set_snapshot read_opts_ptr
-    return read_opts_ptr
+  read_opts_ptr <- c_rocksdb_readoptions_create
+  forM_ maybe_snap_ptr $ c_rocksdb_readoptions_set_snapshot read_opts_ptr
+  return read_opts_ptr
 
 -- | Destroy read options created with 'createReadOpts'.
 destroyReadOpts :: ReadOpts -> IO ()
@@ -244,7 +271,7 @@ destroyReadOpts = c_rocksdb_readoptions_destroy
 -- destroyed when it returns.
 withWriteOpts :: (WriteOpts -> IO a) -> IO a
 withWriteOpts =
-    bracket
+  bracket
     c_rocksdb_writeoptions_create
     c_rocksdb_writeoptions_destroy
 
@@ -261,18 +288,18 @@ freeCString = c_rocksdb_free
 -- freed.
 throwIfErr :: String -> (ErrPtr -> IO a) -> IO a
 throwIfErr s f = alloca $ \err_ptr -> do
-    poke err_ptr nullPtr
-    res  <- f err_ptr
-    err_cstr <- peek err_ptr
-    when (err_cstr /= nullPtr) $ do
-        err <- peekCString err_cstr
-        free err_cstr
-        throwIO $ userError $ s ++ ": " ++ err
-    return res
+  poke err_ptr nullPtr
+  res <- f err_ptr
+  err_cstr <- peek err_ptr
+  when (err_cstr /= nullPtr) $ do
+    err <- peekCString err_cstr
+    free err_cstr
+    throwIO $ userError $ s ++ ": " ++ err
+  return res
 
 -- | Convert a 'Bool' to a C boolean.
 boolToCBool :: Bool -> CBool
-boolToCBool True  = 1
+boolToCBool True = 1
 boolToCBool False = 0
 {-# INLINE boolToCBool #-}
 
@@ -297,7 +324,7 @@ cIntToInt = fromIntegral
 {-# INLINE cIntToInt #-}
 
 -- | Convert a 'Bool' to @1@ or @0@.
-boolToNum :: Num b => Bool -> b
-boolToNum True  = fromIntegral (1 :: Int)
+boolToNum :: (Num b) => Bool -> b
+boolToNum True = fromIntegral (1 :: Int)
 boolToNum False = fromIntegral (0 :: Int)
 {-# INLINE boolToNum #-}

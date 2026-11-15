@@ -185,7 +185,7 @@ it, or has an older version, add it to `stack.yaml`:
 
 ```yaml
 extra-deps:
-  - rocksdb-haskell-jprupp-2.7.1
+  - rocksdb-haskell-jprupp-2.8.0
 ```
 
 With `stack --nix`, add RocksDB to the Nix packages:
@@ -491,6 +491,7 @@ yet, so in practice they are only usable from inside the library.
 | `dbWriteBufferSize`           | database        | Bytes of all memtables together (default unlimited)             |
 | `blockCacheSize`              | database        | Bytes of an LRU block cache shared by all column families       |
 | `maxTotalWalSize`             | database        | Bytes of write-ahead log that trigger flushes                   |
+| `maxBackgroundJobs`           | database        | Threads for flushes and compactions together (RocksDB default 2) |
 | `writeBufferSize`             | column family   | Bytes per memtable (RocksDB default 64 MiB)                     |
 | `bloomFilter`                 | column family   | Full Bloom filter with 10 bits per key                          |
 | `prefixLength`                | column family   | Length of a fixed key prefix for the prefix extractor           |

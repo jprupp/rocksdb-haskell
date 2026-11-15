@@ -1,3 +1,16 @@
+## 2.8.0
+
+ * `maxBackgroundJobs`, a new field of `Config`: how many threads RocksDB may
+   use at once to flush memtables and to compact files, where its default is
+   two, one of each. A database that has a backlog of compactions, after a
+   bulk load for instance, works through it with one thread unless it is
+   given more. More threads only help where the disk and the cores have room
+   for them: a compaction that already waits for a slow disk is not made
+   faster by a second one, and both take from the reads.
+ * The `Config` record has a new field, so code that builds one without
+   `def` has to set it; code that starts from `def` needs no change. This is
+   why the version is 2.8.0 and not 2.7.2.
+
 ## 2.7.1
 
  * Documentation and tests only; the library behaves as in 2.7.0.

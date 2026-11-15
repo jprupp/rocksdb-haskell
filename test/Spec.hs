@@ -32,11 +32,14 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as C
 import Data.Default (def)
+import Data.List (isPrefixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
 import Database.RocksDB
 import GHC.Clock (getMonotonicTime)
+import System.Directory (listDirectory)
+import System.FilePath ((</>))
 import System.IO.Temp
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
@@ -747,6 +750,16 @@ tuningSpec = describe "Tuning" $ do
       withDBCF path tuned {maxTotalWalSize = Just (1024 * 1024)} [("one", tuned)] $ \db -> do
         put db "key" "value"
         get db "key" `shouldReturn` Just "value"
+  it "opens with the number of background jobs that it is given" $
+    withTempPath $ \path -> do
+      let setting = "max_background_jobs="
+          -- RocksDB writes the options that it runs with to a file
+          jobs = do
+            files <- filter ("OPTIONS-" `isPrefixOf`) <$> listDirectory path
+            concat <$> forM files (fmap (settings . lines) . readFile . (path </>))
+          settings = filter (setting `isPrefixOf`) . map (dropWhile (== ' '))
+      withDB path plain {maxBackgroundJobs = Just 5} $ \db -> put db "key" "value"
+      jobs >>= (`shouldSatisfy` elem (setting <> "5"))
   it "works with few open files and paranoid checks" $
     withTempPath $ \path -> do
       let strict =

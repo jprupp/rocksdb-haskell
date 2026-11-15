@@ -81,21 +81,25 @@
 -- and values are copied into Haskell memory before they are returned.
 module Database.RocksDB.Iterator
   ( Iterator,
+
     -- * Bracket-style iteration
     withIter,
     withIterCF,
     withIterSnap,
     withIterSnapCF,
+
     -- * Bounded iteration
     IterConfig (..),
     withIterConfig,
     prefixUpperBound,
+
     -- * Manual iterator management
     createIterator,
     createIteratorSnap,
     createIteratorConfig,
     destroyIterator,
     destroyReadOpts,
+
     -- * Iterator operations
     iterEntry,
     iterFirst,
@@ -145,54 +149,54 @@ withIterCF db cf = withIterCommon db Nothing (Just cf)
 -- enabling consistent reads across multiple iterators and point queries.
 --
 -- Iterator should not be used after computation ends.
-withIterSnap
-    :: DB
-    -> Maybe Snapshot
-    -> (Iterator -> IO a)
-    -> IO a
+withIterSnap ::
+  DB ->
+  Maybe Snapshot ->
+  (Iterator -> IO a) ->
+  IO a
 withIterSnap db msnap = withIterCommon db msnap Nothing
 
 -- | Create 'Iterator' on a column family with a specific snapshot.
 --
 -- If 'Nothing' is passed for snapshot, the iterator creates its own implicit snapshot.
 -- If 'Just snapshot' is passed, the iterator uses the provided snapshot.
-withIterSnapCF
-    :: DB
-    -> Maybe Snapshot
-    -> ColumnFamily
-    -> (Iterator -> IO a)
-    -> IO a
+withIterSnapCF ::
+  DB ->
+  Maybe Snapshot ->
+  ColumnFamily ->
+  (Iterator -> IO a) ->
+  IO a
 withIterSnapCF db msnap cf = withIterCommon db msnap (Just cf)
 
 -- | Create an iterator over the default column family, or over a column family
 -- if one is given, reading from a snapshot if one is given.
-withIterCommon
-    :: DB
-    -> Maybe Snapshot
-    -> Maybe ColumnFamily
-    -> (Iterator -> IO a)
-    -> IO a
-withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
-    case msnap of
-        Nothing ->
-            -- Use DB's readOpts (iterator creates implicit snapshot)
-            bracket (create_iterator read_opts) destroy_iterator f
-        Just snap ->
-            -- Create temporary ReadOpts with the provided snapshot
-            bracket create_read_opts destroy_read_opts $ \ro ->
-                bracket (create_iterator ro) destroy_iterator f
-          where
-            create_read_opts = do
-                ro <- c_rocksdb_readoptions_create
-                c_rocksdb_readoptions_set_snapshot ro snap
-                return ro
-            destroy_read_opts = c_rocksdb_readoptions_destroy
+withIterCommon ::
+  DB ->
+  Maybe Snapshot ->
+  Maybe ColumnFamily ->
+  (Iterator -> IO a) ->
+  IO a
+withIterCommon DB {rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
+  case msnap of
+    Nothing ->
+      -- Use DB's readOpts (iterator creates implicit snapshot)
+      bracket (create_iterator read_opts) destroy_iterator f
+    Just snap ->
+      -- Create temporary ReadOpts with the provided snapshot
+      bracket create_read_opts destroy_read_opts $ \ro ->
+        bracket (create_iterator ro) destroy_iterator f
+      where
+        create_read_opts = do
+          ro <- c_rocksdb_readoptions_create
+          c_rocksdb_readoptions_set_snapshot ro snap
+          return ro
+        destroy_read_opts = c_rocksdb_readoptions_destroy
   where
     destroy_iterator = c_rocksdb_iter_destroy
     create_iterator ro =
-        throwErrnoIfNull "create_iterator" $ case mcf of
-            Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
-            Nothing -> c_rocksdb_create_iterator rocks_db ro
+      throwErrnoIfNull "create_iterator" $ case mcf of
+        Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
+        Nothing -> c_rocksdb_create_iterator rocks_db ro
 
 -- | Where an iterator stops, and what a seek promises. 'def' asks for
 -- nothing, which gives the iterator that 'withIter' creates; override the
@@ -217,52 +221,52 @@ withIterCommon DB{rocksDB = rocks_db, readOpts = read_opts} msnap mcf f =
 -- * 'totalOrderSeek' when a database with a 'prefixLength' has to be walked
 --   from end to end.
 data IterConfig = IterConfig
-    { lowerBound :: !(Maybe ByteString)
-      -- ^ the smallest key that the iterator can be at. Going backwards, it
-      -- becomes invalid instead of moving to a smaller key; a seek to a
-      -- smaller key lands on the first key at or after the bound.
-    , upperBound :: !(Maybe ByteString)
-      -- ^ a key that the iterator stays below: the bound itself is outside.
-      -- Going forwards, the iterator becomes invalid instead of reaching the
-      -- bound or a larger key, and 'iterLast' goes to the last key below it.
-      -- 'prefixUpperBound' gives the bound that ends a prefix.
-    , prefixSameAsStart :: !Bool
-      -- ^ stay within the prefix of the key that the iterator was last sent
-      -- to: it becomes invalid instead of moving to a key with another
-      -- prefix. The prefix is the first 'Database.RocksDB.prefixLength'
-      -- bytes of a key. After 'iterSeek' it is the prefix of the key
-      -- sought; after 'iterFirst' or 'iterLast', that of the key found, so
-      -- that those two give the first or the last prefix of the database
-      -- and no more. It has no effect in a database or column family
-      -- without a prefix length, nor together with 'totalOrderSeek'.
-      --
-      -- __Every key has to be at least as long as the prefix__: the keys
-      -- sought, and the keys stored. RocksDB takes the prefix of a key
-      -- without looking at its length, so with a shorter key it reads the
-      -- bytes that follow it in memory, and where the iterator stops is
-      -- then anyone's guess. This binding cannot check it for you, because
-      -- an 'Iterator' does not know how it was made. If keys can be
-      -- shorter, use an 'upperBound', which has no such condition.
-    , totalOrderSeek :: !Bool
-      -- ^ see every key in order, whatever its prefix, in a database or
-      -- column family that has a 'Database.RocksDB.prefixLength'. There, a
-      -- plain iterator is only sure to return the keys that share the prefix
-      -- of the key it was sent to; what it does once it moves past them, or
-      -- after 'iterFirst', is not defined. That is the price of the prefix
-      -- filters, which let a seek skip the files that have nothing for a
-      -- prefix. This option gives up the filters and gets the order back.
-    }
-    deriving (Eq, Show)
+  { -- | the smallest key that the iterator can be at. Going backwards, it
+    -- becomes invalid instead of moving to a smaller key; a seek to a
+    -- smaller key lands on the first key at or after the bound.
+    lowerBound :: !(Maybe ByteString),
+    -- | a key that the iterator stays below: the bound itself is outside.
+    -- Going forwards, the iterator becomes invalid instead of reaching the
+    -- bound or a larger key, and 'iterLast' goes to the last key below it.
+    -- 'prefixUpperBound' gives the bound that ends a prefix.
+    upperBound :: !(Maybe ByteString),
+    -- | stay within the prefix of the key that the iterator was last sent
+    -- to: it becomes invalid instead of moving to a key with another
+    -- prefix. The prefix is the first 'Database.RocksDB.prefixLength'
+    -- bytes of a key. After 'iterSeek' it is the prefix of the key
+    -- sought; after 'iterFirst' or 'iterLast', that of the key found, so
+    -- that those two give the first or the last prefix of the database
+    -- and no more. It has no effect in a database or column family
+    -- without a prefix length, nor together with 'totalOrderSeek'.
+    --
+    -- __Every key has to be at least as long as the prefix__: the keys
+    -- sought, and the keys stored. RocksDB takes the prefix of a key
+    -- without looking at its length, so with a shorter key it reads the
+    -- bytes that follow it in memory, and where the iterator stops is
+    -- then anyone's guess. This binding cannot check it for you, because
+    -- an 'Iterator' does not know how it was made. If keys can be
+    -- shorter, use an 'upperBound', which has no such condition.
+    prefixSameAsStart :: !Bool,
+    -- | see every key in order, whatever its prefix, in a database or
+    -- column family that has a 'Database.RocksDB.prefixLength'. There, a
+    -- plain iterator is only sure to return the keys that share the prefix
+    -- of the key it was sent to; what it does once it moves past them, or
+    -- after 'iterFirst', is not defined. That is the price of the prefix
+    -- filters, which let a seek skip the files that have nothing for a
+    -- prefix. This option gives up the filters and gets the order back.
+    totalOrderSeek :: !Bool
+  }
+  deriving (Eq, Show)
 
 -- | No bounds, and seeks as RocksDB does them by default.
 instance Default IterConfig where
-    def =
-        IterConfig
-            { lowerBound = Nothing
-            , upperBound = Nothing
-            , prefixSameAsStart = False
-            , totalOrderSeek = False
-            }
+  def =
+    IterConfig
+      { lowerBound = Nothing,
+        upperBound = Nothing,
+        prefixSameAsStart = False,
+        totalOrderSeek = False
+      }
 
 -- | The smallest key that is greater than every key that starts with the
 -- given prefix: the 'upperBound' of a scan of the prefix.
@@ -276,9 +280,9 @@ instance Default IterConfig where
 -- Just "user;"
 prefixUpperBound :: ByteString -> Maybe ByteString
 prefixUpperBound prefix =
-    case B.unsnoc (B.dropWhileEnd (== 0xff) prefix) of
-        Nothing -> Nothing
-        Just (start, byte) -> Just (B.snoc start (byte + 1))
+  case B.unsnoc (B.dropWhileEnd (== 0xff) prefix) of
+    Nothing -> Nothing
+    Just (start, byte) -> Just (B.snoc start (byte + 1))
 
 -- | Create an 'Iterator' that stops where an t'IterConfig' says, over the
 -- default column family or over a column family if one is given, and use it.
@@ -297,7 +301,7 @@ prefixUpperBound prefix =
 -- Iterator should not be used after computation ends.
 withIterConfig :: DB -> Maybe ColumnFamily -> IterConfig -> (Iterator -> IO a) -> IO a
 withIterConfig db mcf cfg f =
-    bracket (createIteratorConfig db mcf cfg) snd (f . fst)
+  bracket (createIteratorConfig db mcf cfg) snd (f . fst)
 
 -- | Manually create an unmanaged iterator like that of 'withIterConfig'.
 --
@@ -310,34 +314,34 @@ withIterConfig db mcf cfg f =
 -- For automatic resource management, prefer 'withIterConfig'.
 createIteratorConfig :: DB -> Maybe ColumnFamily -> IterConfig -> IO (Iterator, IO ())
 createIteratorConfig db mcf cfg = mask_ $ do
-    ro <- c_rocksdb_readoptions_create
-    lower <- bound ro c_rocksdb_readoptions_set_iterate_lower_bound (lowerBound cfg)
-    upper <- bound ro c_rocksdb_readoptions_set_iterate_upper_bound (upperBound cfg)
-    let release = do
-            c_rocksdb_readoptions_destroy ro
-            mapM_ free lower
-            mapM_ free upper
-    it <- flip onException release $ do
-        forM_ (snapshot db) (c_rocksdb_readoptions_set_snapshot ro)
-        when (prefixSameAsStart cfg) $ c_rocksdb_readoptions_set_prefix_same_as_start ro 1
-        when (totalOrderSeek cfg) $ c_rocksdb_readoptions_set_total_order_seek ro 1
-        createIteratorWithOpts db ro mcf
-    return (it, c_rocksdb_iter_destroy it >> release)
+  ro <- c_rocksdb_readoptions_create
+  lower <- bound ro c_rocksdb_readoptions_set_iterate_lower_bound (lowerBound cfg)
+  upper <- bound ro c_rocksdb_readoptions_set_iterate_upper_bound (upperBound cfg)
+  let release = do
+        c_rocksdb_readoptions_destroy ro
+        mapM_ free lower
+        mapM_ free upper
+  it <- flip onException release $ do
+    forM_ (snapshot db) (c_rocksdb_readoptions_set_snapshot ro)
+    when (prefixSameAsStart cfg) $ c_rocksdb_readoptions_set_prefix_same_as_start ro 1
+    when (totalOrderSeek cfg) $ c_rocksdb_readoptions_set_total_order_seek ro 1
+    createIteratorWithOpts db ro mcf
+  return (it, c_rocksdb_iter_destroy it >> release)
   where
     -- A copy of the bound outside the Haskell heap, where it does not move
     -- and lives until it is freed. One byte is asked for at least, so that
     -- an empty bound has a pointer too.
     bound ::
-        ReadOpts ->
-        (ReadOpts -> CString -> CSize -> IO ()) ->
-        Maybe ByteString ->
-        IO (Maybe CString)
+      ReadOpts ->
+      (ReadOpts -> CString -> CSize -> IO ()) ->
+      Maybe ByteString ->
+      IO (Maybe CString)
     bound ro set mkey = forM mkey $ \key -> do
-        let len = B.length key
-        ptr <- mallocBytes (max 1 len)
-        BU.unsafeUseAsCString key $ \src -> copyBytes ptr src len
-        set ro ptr (intToCSize len)
-        return ptr
+      let len = B.length key
+      ptr <- mallocBytes (max 1 len)
+      BU.unsafeUseAsCString key $ \src -> copyBytes ptr src len
+      set ro ptr (intToCSize len)
+      return ptr
 
 -- | Manually create unmanaged iterator, over the default column family or over
 -- a column family if one is given. It uses the 'readOpts' of the t'DB', so if
@@ -345,10 +349,10 @@ createIteratorConfig db mcf cfg = mask_ $ do
 -- snapshot. It must be released with 'destroyIterator', and must not outlive
 -- the t'DB'.
 createIterator :: DB -> Maybe ColumnFamily -> IO Iterator
-createIterator DB{rocksDB = rocks_db, readOpts = read_opts} mcf =
-    throwErrnoIfNull "create_iterator" $ case mcf of
-        Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
-        Nothing -> c_rocksdb_create_iterator rocks_db read_opts
+createIterator DB {rocksDB = rocks_db, readOpts = read_opts} mcf =
+  throwErrnoIfNull "create_iterator" $ case mcf of
+    Just cf -> c_rocksdb_create_iterator_cf rocks_db read_opts cf
+    Nothing -> c_rocksdb_create_iterator rocks_db read_opts
 
 -- | Manually create unmanaged iterator on a specific snapshot.
 --
@@ -360,29 +364,29 @@ createIterator DB{rocksDB = rocks_db, readOpts = read_opts} mcf =
 -- and 'destroyReadOpts' for the read options.
 --
 -- For automatic resource management, prefer 'withIterSnap'.
-createIteratorSnap
-    :: DB
-    -> Maybe Snapshot
-    -> Maybe ColumnFamily
-    -> IO (Iterator, Maybe ReadOpts)
+createIteratorSnap ::
+  DB ->
+  Maybe Snapshot ->
+  Maybe ColumnFamily ->
+  IO (Iterator, Maybe ReadOpts)
 createIteratorSnap db msnap mcf = case msnap of
-    Nothing -> (, Nothing) <$> createIterator db mcf
-    Just snap -> do
-        ro <- c_rocksdb_readoptions_create
-        c_rocksdb_readoptions_set_snapshot ro snap
-        it <- createIteratorWithOpts db ro mcf
-        return (it, Just ro)
+  Nothing -> (,Nothing) <$> createIterator db mcf
+  Just snap -> do
+    ro <- c_rocksdb_readoptions_create
+    c_rocksdb_readoptions_set_snapshot ro snap
+    it <- createIteratorWithOpts db ro mcf
+    return (it, Just ro)
 
 -- | Internal: create iterator with explicit ReadOpts.
-createIteratorWithOpts
-    :: DB
-    -> ReadOpts
-    -> Maybe ColumnFamily
-    -> IO Iterator
-createIteratorWithOpts DB{rocksDB = rocks_db} ro mcf =
-    throwErrnoIfNull "create_iterator" $ case mcf of
-        Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
-        Nothing -> c_rocksdb_create_iterator rocks_db ro
+createIteratorWithOpts ::
+  DB ->
+  ReadOpts ->
+  Maybe ColumnFamily ->
+  IO Iterator
+createIteratorWithOpts DB {rocksDB = rocks_db} ro mcf =
+  throwErrnoIfNull "create_iterator" $ case mcf of
+    Just cf -> c_rocksdb_create_iterator_cf rocks_db ro cf
+    Nothing -> c_rocksdb_create_iterator rocks_db ro
 
 -- | Destroy unmanaged iterator created with 'createIterator' or
 -- 'createIteratorSnap'. It must not be used afterwards.
@@ -393,16 +397,16 @@ destroyIterator = c_rocksdb_iter_destroy
 -- function returns /true/ iff the iterator is valid.
 iterValid :: Iterator -> IO Bool
 iterValid iter_ptr = do
-    x <- c_rocksdb_iter_valid iter_ptr
-    return (x /= 0)
+  x <- c_rocksdb_iter_valid iter_ptr
+  return (x /= 0)
 
 -- | Position at the first key in the source that is at or past target. The
 -- iterator is /valid/ after this call iff the source contains an entry that
 -- comes at or past target.
 iterSeek :: Iterator -> ByteString -> IO ()
 iterSeek iter_ptr key =
-    BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
-        c_rocksdb_iter_seek iter_ptr key_ptr (intToCSize klen)
+  BU.unsafeUseAsCStringLen key $ \(key_ptr, klen) ->
+    c_rocksdb_iter_seek iter_ptr key_ptr (intToCSize klen)
 
 -- | Position at the first key in the source. The iterator is /valid/ after this
 -- call iff the source is not empty.
@@ -425,8 +429,8 @@ iterLast = c_rocksdb_iter_seek_to_last
 -- which is the right trade for a Haskell binding.
 iterNext :: Iterator -> IO ()
 iterNext it = do
-    valid <- iterValid it
-    when valid $ c_rocksdb_iter_next it
+  valid <- iterValid it
+  when valid $ c_rocksdb_iter_next it
 
 -- | Moves to the previous entry in the source. After this call, 'iterValid' is
 -- /true/ iff the iterator was not positioned at the first entry in the source.
@@ -436,8 +440,8 @@ iterNext it = do
 -- 'iterFirst' or 'iterLast' instead.
 iterPrev :: Iterator -> IO ()
 iterPrev it = do
-    valid <- iterValid it
-    when valid $ c_rocksdb_iter_prev it
+  valid <- iterValid it
+  when valid $ c_rocksdb_iter_prev it
 
 -- | Return the key for the current entry if the iterator is currently
 -- positioned at an entry, ie. 'iterValid'.
@@ -456,9 +460,9 @@ iterValue it = iterString it c_rocksdb_iter_value
 -- at an entry, ie. 'iterValid'.
 iterEntry :: Iterator -> IO (Maybe (ByteString, ByteString))
 iterEntry it = do
-    mkey <- iterKey it
-    mval <- iterValue it
-    return $ (,) <$> mkey <*> mval
+  mkey <- iterKey it
+  mval <- iterValue it
+  return $ (,) <$> mkey <*> mval
 
 -- | Check for errors
 --
@@ -468,12 +472,12 @@ iterEntry it = do
 -- apart. Returns 'Nothing' if there was no error.
 iterGetError :: Iterator -> IO (Maybe ByteString)
 iterGetError iter_ptr = alloca $ \err_ptr -> do
-    poke err_ptr nullPtr
-    c_rocksdb_iter_get_error iter_ptr err_ptr
-    err_str <- peek err_ptr
-    if err_str == nullPtr
-        then return Nothing
-        else Just <$> BU.unsafePackMallocCString err_str
+  poke err_ptr nullPtr
+  c_rocksdb_iter_get_error iter_ptr err_ptr
+  err_str <- peek err_ptr
+  if err_str == nullPtr
+    then return Nothing
+    else Just <$> BU.unsafePackMallocCString err_str
 
 --
 -- Internal
@@ -482,17 +486,17 @@ iterGetError iter_ptr = alloca $ \err_ptr -> do
 -- | Read a C string from the iterator using the given accessor, if the
 -- iterator is valid. The string is copied, since it belongs to the iterator.
 iterString ::
-    Iterator ->
-    (Iterator -> Ptr CSize -> IO CString) ->
-    IO (Maybe ByteString)
+  Iterator ->
+  (Iterator -> Ptr CSize -> IO CString) ->
+  IO (Maybe ByteString)
 iterString it f = do
-    valid <- iterValid it
-    if valid
-        then alloca $ \len_ptr -> do
-            str_ptr <- f it len_ptr
-            if str_ptr == nullPtr
-                then return Nothing
-                else do
-                    len <- peek len_ptr
-                    Just <$> B.packCStringLen (str_ptr, cSizeToInt len)
-        else return Nothing
+  valid <- iterValid it
+  if valid
+    then alloca $ \len_ptr -> do
+      str_ptr <- f it len_ptr
+      if str_ptr == nullPtr
+        then return Nothing
+        else do
+          len <- peek len_ptr
+          Just <$> B.packCStringLen (str_ptr, cSizeToInt len)
+    else return Nothing
