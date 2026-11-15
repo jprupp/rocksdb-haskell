@@ -51,6 +51,53 @@
    capabilities. The first row is a loop that returns its list with
    `(entry :) <$> go`; the run-time system walks the stack at every such
    call, and that loop leaves a frame on it for every entry.
+ * A large batch in a few foreign calls. `write` hands RocksDB the
+   operations of a batch one call at a time, each a call for which the
+   Haskell thread gives up its capability and has to get one back. For the
+   65,000 keys of a Bitcoin block that was more than half of the time of
+   the batch, and nearly all of it in a program whose other threads were
+   busy. `writePacked` takes the batch as chunks of packed records, and a
+   second function of `cbits/rocksdb_haskell.c` adds the operations of a
+   chunk to the batch in one call. The batch is then written as before:
+   atomically, with one write, however many chunks it came in.
+
+   `packOps` packs a list of `BatchOp` into a chunk. A program that
+   serialises its keys and values itself can write records straight into
+   its own buffers instead, with no `ByteString` for each: it leaves
+   `packedHeaderSize` bytes, serialises the key and the value after them,
+   and fills in the header with `pokePackedHeader` once the lengths are
+   known. Records are not aligned, so the next one starts where the last
+   one ended.
+
+   A chunk is checked in C before anything of it is used. One that is cut
+   short, that has a length reaching past its end, an operation that does
+   not exist or a delete with a value, makes `writePacked` throw, with
+   nothing written.
+
+   A record can also ask for a merge (`PackedMerge`), which is handed to
+   `rocksdb_writebatch_merge`. The binding still has no way to give a
+   column family a merge operator, so RocksDB refuses such a batch; the
+   format has it so that it need not change later.
+
+   The format is this package's own. It is not RocksDB's internal encoding
+   of a batch (`rocksdb_writebatch_create_from`), which would save a copy
+   and tie the binding to the insides of RocksDB.
+
+   Milliseconds to write a batch of 65,000 operations and 6 MB over four
+   column families, on four capabilities and four cores
+   (`stack bench rocksdb-haskell-jprupp:bench:batch`):
+
+   | Way to write the batch                    | Alone | Next to 8 busy threads |
+   | ----------------------------------------- | ----- | ---------------------- |
+   | `write`: a call for each operation        | 48    | 420                    |
+   | `writePacked`, with `packOps` in the time | 28    | 115                    |
+   | `writePacked`, chunks packed beforehand   | 22    | 28                     |
+
+   All three end with the same write, of about 20 ms. Alone, the calls of
+   `write` cost 400 ns an operation. Next to threads that compute, the
+   thread waits for a capability after each of its 65,000 calls. With all
+   24 hardware threads of the machine free, that took `write` 1,160 ms,
+   and packed chunks 31.
  * The `Config` record has new fields, so code that builds one without `def`
    has to set them; code that starts from `def` needs no change. This is why
    the version is 2.8.0 and not 2.7.2.

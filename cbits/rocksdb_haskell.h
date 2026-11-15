@@ -11,12 +11,16 @@
 #define ROCKSDB_HASKELL_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include <rocksdb/c.h>
 
-/* Results of rocksdb_haskell_iter_chunk. */
+/* Results of the functions below. */
 #define ROCKSDB_HASKELL_OK 0
+/* of rocksdb_haskell_iter_chunk */
 #define ROCKSDB_HASKELL_NO_MEMORY 1
+/* of rocksdb_haskell_writebatch_add_packed */
+#define ROCKSDB_HASKELL_MALFORMED 2
 
 /*
  * Read entries of an iterator, from the one it is on, in one call.
@@ -75,5 +79,71 @@ int rocksdb_haskell_iter_chunk(
     size_t *count,
     unsigned char *more,
     char **errptr);
+
+/* The operation of a record of rocksdb_haskell_writebatch_add_packed. */
+#define ROCKSDB_HASKELL_PUT 0
+#define ROCKSDB_HASKELL_DELETE 1
+#define ROCKSDB_HASKELL_MERGE 2
+
+/*
+ * The bytes that come before the key of such a record: a column family
+ * handle, two lengths and an operation.
+ */
+#define ROCKSDB_HASKELL_RECORD_HEADER \
+    (sizeof(rocksdb_column_family_handle_t *) + 2 * sizeof(uint32_t) + 1)
+
+/*
+ * Add many operations to a write batch in one call.
+ *
+ * Why: a Haskell program pays for every foreign call that may block, so a
+ * batch that is built with rocksdb_writebatch_put_cf pays once for each
+ * key. For the 65,000 keys of a Bitcoin block that was more than half of
+ * the time that the batch took to write, and nearly all of it when other
+ * threads of the program were busy: bench/Batch.hs. This function takes
+ * the operations packed one after another in a buffer and makes those
+ * calls from C, so that the program pays once for a few thousand.
+ *
+ * "records" holds "len" bytes: any number of records, with nothing between
+ * them and nothing after the last. A record is
+ *
+ *     rocksdb_column_family_handle_t *family;   NULL: the default one
+ *     uint32_t key_len;
+ *     uint32_t value_len;                       zero for a delete
+ *     unsigned char operation;                  ROCKSDB_HASKELL_PUT, ...
+ *     key bytes; value bytes
+ *
+ * with no padding anywhere: the header is ROCKSDB_HASKELL_RECORD_HEADER
+ * bytes, 17 where a pointer has eight, and nothing in it is aligned. The
+ * handle and the lengths are as this machine holds them in memory, written
+ * with memcpy or its like. Being unaligned is what lets a program write a
+ * record where the last one ended, in a buffer of its own, and fill in the
+ * lengths once it has serialised the key and the value after the header.
+ *
+ * The operations are added in the order of the records, each as the
+ * function of RocksDB that it names would add it: rocksdb_writebatch_put,
+ * rocksdb_writebatch_delete or rocksdb_writebatch_merge for the default
+ * column family, and the ones ending in _cf for a handle. RocksDB copies
+ * the keys and values, so the buffer is not needed after the call.
+ *
+ * A merge is only added here. Whether the column family has a merge
+ * operator to apply it with is for RocksDB to say, when the batch is
+ * written or when the key is read.
+ *
+ * The buffer is checked before anything is added, and the call never reads
+ * outside it. If a record is cut short by the end of the buffer, names an
+ * operation that does not exist, or is a delete with a value, the result is
+ * ROCKSDB_HASKELL_MALFORMED, the batch is as it was, and "*count" is the
+ * number of whole records before the bad one. A handle cannot be checked:
+ * one that is not NULL has to be a column family of the database that the
+ * batch is written to.
+ *
+ * The result is ROCKSDB_HASKELL_OK otherwise, and "*count" is the number of
+ * operations added.
+ */
+int rocksdb_haskell_writebatch_add_packed(
+    rocksdb_writebatch_t *batch,
+    const char *records,
+    size_t len,
+    size_t *count);
 
 #endif

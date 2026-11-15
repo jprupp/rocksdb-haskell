@@ -23,9 +23,11 @@
 -- for example when they wait for disk or for a compaction to make room, and a
 -- @safe@ call lets other Haskell threads keep running meanwhile. The extra
 -- cost per call is worth that in a concurrent program. Where it adds up, in
--- a scan that moves an iterator once for every entry, the answer is fewer
--- calls and not unsafe ones: 'c_rocksdb_haskell_iter_chunk' reads many
--- entries in one.
+-- a scan that moves an iterator once for every entry or a batch that is
+-- given its keys one by one, the answer is fewer calls and not unsafe ones:
+-- 'c_rocksdb_haskell_iter_chunk' reads many entries in one, and
+-- 'c_rocksdb_haskell_writebatch_add_packed' adds many operations to a batch
+-- in one.
 --
 -- = Keeping the types in step with the header
 --
@@ -106,6 +108,7 @@ module Database.RocksDB.C
     c_rocksdb_writebatch_put_cf,
     c_rocksdb_writebatch_delete,
     c_rocksdb_writebatch_delete_cf,
+    c_rocksdb_haskell_writebatch_add_packed,
     c_rocksdb_options_create,
     c_rocksdb_options_destroy,
     c_rocksdb_options_set_create_if_missing,
@@ -607,6 +610,31 @@ foreign import ccall safe "rocksdb/c.h rocksdb_writebatch_delete_cf"
     Key ->
     CSize ->
     IO ()
+
+-- | Binding to @rocksdb_haskell_writebatch_add_packed@, which is not part of
+-- RocksDB: it is this package's own, in @cbits\/rocksdb_haskell.c@, and its
+-- header says what it promises and how a record is laid out. It adds many
+-- operations to a write batch in one call.
+--
+-- The arguments are the batch, the buffer of packed records and its length,
+-- and where to store the number of records. The result is not zero if the
+-- buffer does not hold whole and well formed records: the batch is then as
+-- it was, and the number is that of the records before the bad one.
+--
+-- A safe call, like the calls to @rocksdb_writebatch_put_cf@ that it stands
+-- for, so that a buffer of megabytes does not hold up the other Haskell
+-- threads while RocksDB copies it. A program makes one for a few thousand
+-- operations, and no longer one for each.
+--
+-- It is imported with @capi@ so that the C compiler checks the types below
+-- against the prototype in the header.
+foreign import capi safe "rocksdb_haskell.h rocksdb_haskell_writebatch_add_packed"
+  c_rocksdb_haskell_writebatch_add_packed ::
+    WriteBatch ->
+    CString ->
+    CSize ->
+    Ptr CSize ->
+    IO CInt
 
 --
 -- Options

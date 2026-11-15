@@ -49,12 +49,30 @@ tests:
       - directory
       - filepath
 
+# The two benchmarks share a directory, and each is one file: without
+# other-modules, each would take the file of the other for a module.
 benchmarks:
   scan:
     main: Scan.hs
     source-dirs: bench
+    other-modules: []
     # four capabilities whatever the machine has, so that sixteen threads
     # compete for them as the threads of a busy server do
+    ghc-options:
+      - -O2
+      - -threaded
+      - -rtsopts
+      - -with-rtsopts=-N4
+    dependencies:
+      - rocksdb-haskell-jprupp
+      - async
+      - temporary
+  batch:
+    main: Batch.hs
+    source-dirs: bench
+    other-modules: []
+    # four capabilities, as for the scans: one thread writes, and in half of
+    # the measurements eight more compete with it for them
     ghc-options:
       - -O2
       - -threaded

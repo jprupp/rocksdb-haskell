@@ -47,6 +47,14 @@ module Database.RocksDB.Base
     createSnapshot,
     releaseSnapshot,
 
+    -- * Packed batches
+    -- $packed
+    writePacked,
+    packOps,
+    PackedOp (..),
+    packedHeaderSize,
+    pokePackedHeader,
+
     -- * Administrative Functions
     Property (..),
     getProperty,
@@ -62,12 +70,15 @@ module Database.RocksDB.Base
 where
 
 import Control.Exception
-import Control.Monad (forM, when)
+import Control.Monad (foldM_, forM, forM_, when)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.ByteString.Internal (ByteString (..))
+import qualified Data.ByteString.Internal as BI
 import qualified Data.ByteString.Unsafe as BU
 import Data.Int
+import Data.Maybe (fromMaybe)
+import Data.Word (Word32, Word8)
 import Database.RocksDB.C
 import Database.RocksDB.Internal
 import Database.RocksDB.Iterator
@@ -75,7 +86,7 @@ import Foreign.C.String
 import Foreign.ForeignPtr
 import Foreign.Marshal.Alloc
 import Foreign.Marshal.Array
-import Foreign.Marshal.Utils (withMany)
+import Foreign.Marshal.Utils (copyBytes, withMany)
 import Foreign.Ptr
 import Foreign.Storable
 import System.Directory
@@ -585,6 +596,10 @@ deleteCommon DB {rocksDB = db_ptr, writeOpts = write_opts} mcf key =
 --
 -- The keys and values are kept alive until RocksDB has copied them, because
 -- they are handed to C as pointers into Haskell memory.
+--
+-- Each operation is handed to RocksDB with a foreign call of its own. For a
+-- batch of tens of thousands of operations, 'writePacked' hands them over a
+-- few thousand at a call.
 write :: DB -> [BatchOp] -> IO ()
 write DB {rocksDB = db_ptr, writeOpts = write_opts} batch =
   bracket
@@ -639,6 +654,209 @@ write DB {rocksDB = db_ptr, writeOpts = write_opts} batch =
       touchForeignPtr p
     touch (DelCF _ (PS p _ _)) =
       touchForeignPtr p
+
+-- $packed
+--
+-- 'write' hands a batch to RocksDB one operation at a time, and each is a
+-- foreign call of the kind that lets other Haskell threads run meanwhile:
+-- the thread gives up its capability for it, and has to get one back. For
+-- a batch of a few operations that is nothing. For the 65,000 keys of a
+-- Bitcoin block it was more than half of the time of the batch in the
+-- benchmark of this package, 26 ms of 48, and 400 ms or more when eight
+-- other threads wanted the four capabilities. It comes on top of a
+-- 'ByteString' for each key and each value, which is memory that the
+-- collector cannot move.
+--
+-- A packed batch is the same operations written one after another into a
+-- few large buffers: /chunks/. 'writePacked' gives each chunk to a small C
+-- function of this package, which adds its operations to the batch, and
+-- then writes the batch as 'write' does: atomically, with one write.
+--
+-- There are two ways to make chunks:
+--
+-- * 'packOps' packs a list of t'BatchOp' into one chunk. It is the simple
+--   way, for small batches and for tests.
+--
+-- * A program that serialises its keys and values itself can do so
+--   straight into a buffer of its own, with no 'ByteString' for each: leave
+--   'packedHeaderSize' bytes, serialise the key and then the value after
+--   them, and fill in the header with 'pokePackedHeader' once the two
+--   lengths are known. The next record starts where the value ended.
+--
+-- A record is a header and then the bytes of the key and of the value, with
+-- no padding. The header is the column family handle (a null pointer for
+-- the default one), the length of the key and that of the value as 32-bit
+-- numbers, and one byte for the operation, all as the machine holds them
+-- in memory and none of them aligned. @cbits\/rocksdb_haskell.h@ has the
+-- layout for a program that writes records by other means.
+--
+-- The format is this package's own, and what a chunk becomes is a series of
+-- calls to the C API of RocksDB. The alternative was to write RocksDB's own
+-- encoding of a batch in Haskell and hand it over whole
+-- (@rocksdb_writebatch_create_from@), which saves the copy in C. That
+-- encoding is internal to RocksDB, with column family numbers and record
+-- types that a binding has no business knowing, and the copy costs a few
+-- milliseconds for a batch that takes hundreds to write.
+--
+-- A chunk holds column family handles, which are pointers: it means
+-- something only in the process that made it, and only while the database
+-- that the handles came from is open.
+
+-- | What a record of a packed batch does to its key.
+data PackedOp
+  = -- | set the key to the value, as 'Put' and 'PutCF' do
+    PackedPut
+  | -- | delete the key, as 'Del' and 'DelCF' do; the record has no value
+    PackedDel
+  | -- | merge the value into what the key has, with the merge operator of
+    -- the column family (@rocksdb_writebatch_merge@).
+    --
+    -- This binding cannot give a column family a merge operator yet, so
+    -- there is no use for it today: it is here so that the format does not
+    -- have to change when it can. On a column family without a merge
+    -- operator, RocksDB 11 refuses the whole batch when it is written, and
+    -- 'writePacked' throws. Do not count on that with another version: one
+    -- that takes the batch has stored a value that it cannot read.
+    PackedMerge
+  deriving (Eq, Show, Enum, Bounded)
+
+-- | Bytes of the header that comes before the key in a record of a packed
+-- batch: 17 where a pointer has eight.
+packedHeaderSize :: Int
+packedHeaderSize = sizeOf (nullPtr :: ColumnFamily) + 2 * sizeOf (0 :: Word32) + 1
+
+-- | Write the header of a record of a packed batch at a pointer, which
+-- needs no alignment: the column family, or 'Nothing' for the default one,
+-- the operation, the length of the key and the length of the value. It
+-- writes 'packedHeaderSize' bytes. The bytes of the key come right after
+-- them, and those of the value right after the key.
+--
+-- It is for a program that serialises keys and values into its own buffer:
+-- see the top of this section. The lengths are only known once that is
+-- done, so the header is written last, into the room left for it.
+--
+-- Throws an 'IOError', and writes nothing, if a length is negative or does
+-- not fit in 32 bits, or if a 'PackedDel' is given a value.
+pokePackedHeader :: Ptr a -> Maybe ColumnFamily -> PackedOp -> Int -> Int -> IO ()
+pokePackedHeader ptr mcf op klen vlen = do
+  when (outside klen || outside vlen) $
+    throwIO (userError "pokePackedHeader: a length that does not fit in 32 bits")
+  when (op == PackedDel && vlen /= 0) $
+    throwIO (userError "pokePackedHeader: a delete with a value")
+  -- Unaligned writes, in the byte order of the machine, which is how
+  -- the C side reads them back with memcpy.
+  poke (castPtr ptr) (fromMaybe nullPtr mcf)
+  pokeByteOff ptr word (fromIntegral klen :: Word32)
+  pokeByteOff ptr (word + 4) (fromIntegral vlen :: Word32)
+  pokeByteOff ptr (word + 8) code
+  where
+    word = sizeOf (nullPtr :: ColumnFamily)
+    -- compared as words, which have 32 bits at least, so that the limit is
+    -- not a negative number where an 'Int' has 32
+    outside n = n < 0 || (fromIntegral n :: Word) > fromIntegral (maxBound :: Word32)
+    -- ROCKSDB_HASKELL_PUT, _DELETE and _MERGE of rocksdb_haskell.h
+    code :: Word8
+    code = case op of
+      PackedPut -> 0
+      PackedDel -> 1
+      PackedMerge -> 2
+{-# INLINE pokePackedHeader #-}
+
+-- | Pack the operations of a batch into one chunk for 'writePacked', in
+-- their order. @'writePacked' db ['packOps' ops]@ does what @'write' db ops@
+-- does.
+--
+-- This is the simple way to a packed batch: it copies every key and value
+-- once more, into a buffer as large as all of them together. Use it for
+-- small batches, for the odd operation that a program does not serialise
+-- itself, and for tests. A program with a large batch gains more by
+-- serialising straight into its own chunks with 'pokePackedHeader'.
+--
+-- The chunk holds the column family handles of the operations, so it is
+-- only good while their database is open. Evaluating it throws an 'IOError'
+-- if a key or a value is of four gigabytes or more.
+packOps :: [BatchOp] -> ByteString
+packOps ops = BI.unsafeCreate (sum (map size ops)) $ \start -> foldM_ pack start ops
+  where
+    parts (Put k v) = (Nothing, PackedPut, k, v)
+    parts (Del k) = (Nothing, PackedDel, k, BS.empty)
+    parts (PutCF cf k v) = (Just cf, PackedPut, k, v)
+    parts (DelCF cf k) = (Just cf, PackedDel, k, BS.empty)
+    size op = case parts op of
+      (_, _, k, v) -> packedHeaderSize + BS.length k + BS.length v
+    -- write the record of an operation, and give where the next one goes
+    pack :: Ptr Word8 -> BatchOp -> IO (Ptr Word8)
+    pack ptr op = do
+      let (mcf, kind, k, v) = parts op
+          key_ptr = ptr `plusPtr` packedHeaderSize
+          val_ptr = key_ptr `plusPtr` BS.length k
+      pokePackedHeader ptr mcf kind (BS.length k) (BS.length v)
+      copy k key_ptr
+      copy v val_ptr
+      return (val_ptr `plusPtr` BS.length v)
+    -- memcpy must not be given the pointer of an empty string
+    copy bytes to =
+      BU.unsafeUseAsCStringLen bytes $ \(from, len) ->
+        when (len > 0) $ copyBytes to (castPtr from) len
+
+-- | Write a batch that is given as packed chunks: see the top of this
+-- section for what they are and how to make them. All the operations of all
+-- the chunks are applied atomically, as one batch and with one write:
+-- either all of them are written or none are. They are applied in the order
+-- of the chunks, and within a chunk in the order of its records, so a later
+-- operation on a key overrides an earlier one.
+--
+-- Every chunk must hold whole records: a record cannot start in one chunk
+-- and end in the next. Where a chunk is cut otherwise does not matter, and
+-- an empty chunk or no chunk at all is fine. So a program that packs on
+-- several cores gives the chunks of each core, one core after another.
+--
+-- Use it for batches of thousands of operations, where it saves the
+-- foreign call that 'write' makes for each operation, and the 'ByteString'
+-- for each key and value if the program packs its own chunks. It makes one
+-- foreign call for each chunk, so chunks of a few hundred kilobytes are
+-- large enough. For a few operations, 'write' is as fast and simpler.
+--
+-- Throws an 'IOError', with nothing written, if a chunk is not made of
+-- whole records: one that is cut short, an operation that does not exist,
+-- a delete with a value. The message names the chunk and the record, both
+-- counted from zero. Each chunk is checked in C before any of it is added
+-- to the batch, and nothing is read outside it. What cannot be checked is
+-- the column family handle of a record: a wrong one crashes the process,
+-- as it would in 'PutCF'.
+--
+-- Also throws an 'IOError' if RocksDB refuses the batch, as 'write' does.
+-- That is what happens to a batch with a 'PackedMerge' for a column family
+-- that has no merge operator: RocksDB 11 refuses it when it is written,
+-- with nothing written.
+writePacked :: DB -> [ByteString] -> IO ()
+writePacked DB {rocksDB = db_ptr, writeOpts = write_opts} chunks =
+  bracket
+    c_rocksdb_writebatch_create
+    c_rocksdb_writebatch_destroy
+    $ \batch_ptr -> do
+      forM_ (zip [0 :: Int ..] chunks) $ \(n, chunk) ->
+        -- the chunk cannot move or be freed during the call, and RocksDB
+        -- has copied what it needs when the call returns
+        BU.unsafeUseAsCStringLen chunk $ \(chunk_ptr, len) ->
+          alloca $ \count_ptr -> do
+            status <-
+              c_rocksdb_haskell_writebatch_add_packed
+                batch_ptr
+                chunk_ptr
+                (intToCSize len)
+                count_ptr
+            when (status /= 0) $ do
+              count <- peek count_ptr
+              -- both are counted from zero
+              throwIO . userError . unwords $
+                [ "writePacked: chunk",
+                  show n,
+                  "is not made of whole records: record",
+                  show (cSizeToInt count),
+                  "is malformed or cut short"
+                ]
+      throwIfErr "write" $ c_rocksdb_write db_ptr write_opts batch_ptr
 
 -- | Marshal a list of strings into C strings that are valid while the function
 -- runs.

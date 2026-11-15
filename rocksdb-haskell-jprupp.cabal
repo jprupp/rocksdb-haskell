@@ -73,11 +73,25 @@ test-suite spec
     , temporary
   default-language: Haskell2010
 
+benchmark batch
+  type: exitcode-stdio-1.0
+  main-is: Batch.hs
+  hs-source-dirs:
+      bench
+  ghc-options: -Wall -O2 -threaded -rtsopts -with-rtsopts=-N4
+  build-depends:
+      async
+    , base >=4.9 && <5
+    , bytestring
+    , data-default
+    , directory
+    , rocksdb-haskell-jprupp
+    , temporary
+  default-language: Haskell2010
+
 benchmark scan
   type: exitcode-stdio-1.0
   main-is: Scan.hs
-  other-modules:
-      Paths_rocksdb_haskell_jprupp
   hs-source-dirs:
       bench
   ghc-options: -Wall -O2 -threaded -rtsopts -with-rtsopts=-N4

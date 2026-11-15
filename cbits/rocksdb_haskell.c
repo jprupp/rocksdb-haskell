@@ -210,3 +210,127 @@ int rocksdb_haskell_iter_chunk(
     *count = read;
     return ROCKSDB_HASKELL_OK;
 }
+
+/* A record of a packed batch, read out of its buffer. */
+struct record {
+    rocksdb_column_family_handle_t *family; /* NULL: the default one */
+    uint32_t key_len;
+    uint32_t value_len;
+    unsigned char operation;
+    const char *key;   /* in the buffer */
+    const char *value; /* in the buffer, after the key */
+    size_t size;       /* of the whole record, header included */
+};
+
+/*
+ * Read the record at the start of the "left" bytes at "bytes". Returns zero
+ * if there is no whole and well formed record there, and reads nothing past
+ * those bytes either way.
+ *
+ * The header is copied out with memcpy because it is not aligned: a record
+ * starts wherever the one before it ended.
+ */
+static int record_at(const char *bytes, size_t left, struct record *record)
+{
+    const size_t header = ROCKSDB_HASKELL_RECORD_HEADER;
+    const char *field = bytes;
+
+    if (left < header) {
+        return 0;
+    }
+    memcpy(&record->family, field, sizeof(record->family));
+    field += sizeof(record->family);
+    memcpy(&record->key_len, field, sizeof(uint32_t));
+    field += sizeof(uint32_t);
+    memcpy(&record->value_len, field, sizeof(uint32_t));
+    field += sizeof(uint32_t);
+    record->operation = (unsigned char)*field;
+
+    if (record->operation > ROCKSDB_HASKELL_MERGE) {
+        return 0;
+    }
+    if (record->operation == ROCKSDB_HASKELL_DELETE && record->value_len != 0) {
+        return 0;
+    }
+    /* one length at a time, so that their sum cannot overflow */
+    left -= header;
+    if (record->key_len > left) {
+        return 0;
+    }
+    left -= record->key_len;
+    if (record->value_len > left) {
+        return 0;
+    }
+
+    record->key = bytes + header;
+    record->value = record->key + record->key_len;
+    record->size = header + record->key_len + record->value_len;
+    return 1;
+}
+
+/* Add a record to a batch, with the function of RocksDB that it names. */
+static void add_record(rocksdb_writebatch_t *batch, const struct record *record)
+{
+    rocksdb_column_family_handle_t *family = record->family;
+    const char *key = record->key;
+    const char *value = record->value;
+    size_t key_len = record->key_len;
+    size_t value_len = record->value_len;
+
+    switch (record->operation) {
+    case ROCKSDB_HASKELL_PUT:
+        if (family == NULL) {
+            rocksdb_writebatch_put(batch, key, key_len, value, value_len);
+        } else {
+            rocksdb_writebatch_put_cf(batch, family, key, key_len, value, value_len);
+        }
+        break;
+    case ROCKSDB_HASKELL_DELETE:
+        if (family == NULL) {
+            rocksdb_writebatch_delete(batch, key, key_len);
+        } else {
+            rocksdb_writebatch_delete_cf(batch, family, key, key_len);
+        }
+        break;
+    case ROCKSDB_HASKELL_MERGE:
+        if (family == NULL) {
+            rocksdb_writebatch_merge(batch, key, key_len, value, value_len);
+        } else {
+            rocksdb_writebatch_merge_cf(batch, family, key, key_len, value, value_len);
+        }
+        break;
+    }
+}
+
+int rocksdb_haskell_writebatch_add_packed(
+    rocksdb_writebatch_t *batch,
+    const char *records,
+    size_t len,
+    size_t *count)
+{
+    struct record record;
+    size_t at;
+    size_t whole = 0;
+
+    /*
+     * Check every record first, so that a bad one leaves the batch as it
+     * was. It costs a second look at headers that are in the cache.
+     */
+    for (at = 0; at < len; at += record.size) {
+        if (!record_at(records + at, len - at, &record)) {
+            *count = whole;
+            return ROCKSDB_HASKELL_MALFORMED;
+        }
+        whole += 1;
+    }
+
+    for (at = 0; at < len; at += record.size) {
+        /* cannot fail: the same bytes passed above */
+        if (!record_at(records + at, len - at, &record)) {
+            break;
+        }
+        add_record(batch, &record);
+    }
+    *count = whole;
+    return ROCKSDB_HASKELL_OK;
+}

@@ -68,9 +68,10 @@ maintained as `rocksdb-haskell-jprupp`.
 - **Stay close to the C API.** Functions map nearly one to one to RocksDB's C
   functions, so RocksDB's own documentation and tuning guides apply directly.
   Conveniences such as typed keys live in separate libraries
-  ([rocksdb-query](https://github.com/jprupp/rocksdb-query)). The one
-  exception is `iterChunk`, which walks an iterator in a C function of this
-  package, because the cost it removes is that of calling C from Haskell.
+  ([rocksdb-query](https://github.com/jprupp/rocksdb-query)). The two
+  exceptions are `iterChunk`, which walks an iterator, and `writePacked`,
+  which fills a batch, each in a C function of this package: the cost they
+  remove is that of calling C from Haskell.
 - **Scope every resource.** Databases, snapshots and iterators are C objects
   that must be freed once and never touched again. `withDB`, `withSnapshot` and
   `withIter` free them when their block ends, even on an exception.
@@ -90,6 +91,7 @@ maintained as `rocksdb-haskell-jprupp`.
 | -------------- | ------------------------------------------------------------------------------ |
 | Basic access   | `get`, `put`, `delete` on strict `ByteString` keys and values                  |
 | Batches        | Atomic `write` of many puts and deletes, across column families                |
+| Packed batches | A batch of any size handed to RocksDB in a few foreign calls, from your buffers |
 | Multi-get      | `multiGet` reads many keys in one call to RocksDB's `MultiGet`                 |
 | Column families| Open a database with several independent key spaces; add new ones on open     |
 | Snapshots      | Consistent point-in-time reads across many queries and iterators               |
@@ -103,7 +105,9 @@ maintained as `rocksdb-haskell-jprupp`.
 ### What is not included
 
 - No transactions (`TransactionDB`, `OptimisticTransactionDB`), merge
-  operators, TTL databases, backups or checkpoints.
+  operators, TTL databases, backups or checkpoints. A packed batch can carry
+  merges, but there is no way yet to give a column family the merge operator
+  that they need.
 - No `DeleteRange` or `SingleDelete`.
 - No custom comparators: keys always sort by their bytes.
 
@@ -540,6 +544,93 @@ Keep to single steps where each move depends on the entry just read, or
 where one entry is all you want: `iterEntry` after a seek reads it without
 moving the iterator.
 
+### Writing a large batch in a few calls
+
+`write` hands a batch to RocksDB one operation at a time, and each is a
+foreign call of the kind that lets other Haskell threads run meanwhile. For
+a batch of a few operations that is nothing. For tens of thousands it adds
+up, and so do the `ByteString`s, one for each key and each value.
+
+A packed batch is the same operations written one after another into a few
+large buffers, the chunks. `writePacked` gives each chunk to a C function of
+this package, which adds its operations to the batch, and then writes the
+batch as `write` does: atomically, with one write.
+
+```haskell
+-- the same as: write db ops
+writePacked db [packOps ops]
+```
+
+`packOps` packs a list of `BatchOp` into one chunk. It is the simple way,
+and it copies every key and value once more. A program that serialises its
+keys and values itself can skip the list, the `ByteString`s and the copy,
+and write records straight into a buffer of its own:
+
+```haskell
+-- one record at a pointer: room for the header, the key, the value, and
+-- then the header, now that the lengths are known
+packRecord :: Ptr Word8 -> ColumnFamily -> IO (Ptr Word8)
+packRecord ptr cf = do
+  let body = ptr `plusPtr` packedHeaderSize
+  keyLen <- serialiseKey body
+  valueLen <- serialiseValue (body `plusPtr` keyLen)
+  pokePackedHeader ptr (Just cf) PackedPut keyLen valueLen
+  return (body `plusPtr` (keyLen + valueLen))
+```
+
+Here `serialiseKey` and `serialiseValue` stand for whatever writes your
+bytes at a pointer and says how many. The next record goes where this one
+ended: records need no alignment and nothing goes between them. A chunk is
+then a `ByteString` over the part of the buffer that holds whole records.
+
+What to know:
+
+- **All the chunks are one batch.** `writePacked db chunks` applies the
+  records of every chunk in order, atomically, with one write. Chunks only
+  decide how much RocksDB is handed in one call: a few hundred kilobytes is
+  plenty. A program that packs on several cores gives the chunks of each
+  core, one core after another.
+- **A chunk holds whole records.** A record cannot start in one chunk and
+  end in the next.
+- **A chunk is checked before it is used.** One that is cut short, or whose
+  lengths say more than it holds, is refused with an exception, and nothing
+  of the batch is written. The check cannot cover the column family handle
+  of a record.
+- **A chunk is only good here and now.** It holds column family handles,
+  which are pointers of this process and of the open database.
+- **`PackedMerge` is for later.** A record can ask for a merge
+  (`rocksdb_writebatch_merge`), which needs a merge operator on the column
+  family, and this binding has no way to set one yet. RocksDB 11 refuses
+  such a batch when it is written.
+
+The layout of a record, for a program that writes them by other means, is
+in `cbits/rocksdb_haskell.h`. It is this package's own format, and what a
+chunk becomes is a series of calls to RocksDB's C API. It is not RocksDB's
+internal encoding of a batch, which a binding should not depend on.
+
+What it saves, in this package's benchmark
+(`stack bench rocksdb-haskell-jprupp:bench:batch`): milliseconds to write a
+batch of 65,000 operations and 6 MB over four column families, on four
+capabilities and four cores, alone and next to eight threads that compute.
+
+| Way to write the batch                    | Alone | Next to busy threads |
+| ----------------------------------------- | ----- | -------------------- |
+| `write`: a call for each operation        | 48    | 420                  |
+| `writePacked`, with `packOps` in the time | 28    | 115                  |
+| `writePacked`, chunks packed beforehand   | 22    | 28                   |
+
+All three end with the same write, which takes about 20 ms here: the rest
+is the handing over. Alone, a thread gets its capability back at once
+after each call, and still pays 400 ns an operation. Next to threads that
+want the capabilities too, as in a server under load, it waits for one
+after every call. `packOps` is work in Haskell, which has to share the
+capabilities with those threads like any other.
+
+With all 24 hardware threads of the machine free, the batch took `write`
+1,160 ms next to the busy threads, and 31 ms from packed chunks.
+
+Keep to `write` for small batches: it is as fast there, and simpler.
+
 ### Properties and maintenance
 
 ```haskell
@@ -614,6 +705,7 @@ every open file and every memtable can grow without bound.
 | Types                    | `DB`, `Config`, `BatchOp`, `ColumnFamily`, `Snapshot`, `Iterator`, `Property`, `Range` |
 | Opening                  | `withDB`, `withDBCF`                                           |
 | Reading and writing      | `get`, `getCF`, `multiGet`, `multiGetCF`, `put`, `putCF`, `delete`, `deleteCF`, `write` |
+| Packed batches           | `writePacked`, `packOps`, `PackedOp`, `packedHeaderSize`, `pokePackedHeader` |
 | Snapshots                | `withSnapshot`, `createSnapshot`, `releaseSnapshot`            |
 | Creating iterators       | `withIter`, `withIterCF`, `withIterSnap`, `withIterSnapCF`     |
 | Bounded iterators        | `IterConfig`, `withIterConfig`, `createIteratorConfig`, `prefixUpperBound` |
@@ -625,7 +717,7 @@ every open file and every memtable can grow without bound.
 
 The FFI bindings (`Database.RocksDB.C`) and helpers (`Database.RocksDB.Internal`)
 are hidden modules. `cbits/rocksdb_haskell.c` is the one piece of C in the
-package: the function behind `iterChunk`.
+package: the functions behind `iterChunk` and `writePacked`.
 
 ## Things to watch out for
 
@@ -659,7 +751,11 @@ package: the function behind `iterChunk`.
 - Calls into RocksDB are `safe` foreign calls, so they do not block other
   Haskell threads, but each one costs more than an `unsafe` call, and much
   more when threads compete for capabilities. A scan by single steps makes
-  one for every entry: read ranges with `iterChunk`.
+  one for every entry: read ranges with `iterChunk`. A `write` makes one
+  for every operation: write batches of thousands with `writePacked`.
+- A chunk for `writePacked` is checked for its lengths, not for its column
+  family handles. A handle that is not of the open database crashes the
+  process, as it does in `PutCF`.
 - A loop over an iterator that is not tail recursive gets slower with every
   entry, because the run-time system walks the stack at each foreign call.
   Keep what has been read in an argument of the loop.
@@ -689,15 +785,18 @@ cd rocksdb-haskell
 
 stack build                        # build the library
 stack test                         # run the tests
-stack bench                        # time scans by single steps and in chunks
+stack bench                        # time scans and large batches
 stack haddock --no-haddock-deps    # build the API documentation
 ```
 
 With `stack --nix`, the `nix` section of `stack.yaml` provides RocksDB.
 
 `bench/Scan.hs` times a scan of 200,000 entries by single steps and in
-chunks, from one thread and from sixteen on four capabilities. To see what
-a machine with four cores does, confine it: `taskset -c 0-3 stack bench`.
+chunks, from one thread and from sixteen on four capabilities.
+`bench/Batch.hs` times a batch of 65,000 operations written with `write`
+and with `writePacked`, alone and next to threads that compute. To see what
+a machine with four cores does, confine them: `taskset -c 0-3 stack bench`.
+To run one of the two: `stack bench rocksdb-haskell-jprupp:bench:batch`.
 
 ### Nix
 

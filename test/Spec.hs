@@ -26,21 +26,26 @@ module Main (main) where
 
 import Control.Concurrent
 import Control.Concurrent.Async
-import Control.Exception (bracket)
+import Control.Exception (bracket, evaluate, try)
 import Control.Monad
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as C
+import Data.ByteString.Internal qualified as BI
 import Data.Default (def)
-import Data.List (isPrefixOf, isSuffixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe
+import Data.Word (Word8)
 import Database.RocksDB
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import GHC.Clock (getMonotonicTime)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
 import System.IO (IOMode (ReadWriteMode), SeekMode (AbsoluteSeek), hSeek, withBinaryFile)
+import System.IO.Error (ioeGetErrorString)
 import System.IO.Temp
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
@@ -54,6 +59,7 @@ main = hspec $ do
   around withPlainDB plainSpec
   around withPlainDB chunkSpec
   chunkErrorSpec
+  packedSpec
   boundSpec
   openingSpec
   tuningSpec
@@ -831,6 +837,223 @@ chunkErrorSpec = describe "Reading many entries from a damaged file" $ do
         iterEntries itr 10 `shouldThrow` anyIOException
 
 -------------------------------------------------------------------------------
+-- Packed batches
+-------------------------------------------------------------------------------
+
+-- | A write to a column family that is named by its number, so that the same
+-- operation can be given to two databases: zero is the default family, and
+-- the others are those of 'columnFamilies' from one. 'Nothing' deletes.
+data FamilyOp = FamilyOp Int ByteString (Maybe ByteString)
+
+-- | The operation of a batch for a database.
+batchOp :: DB -> FamilyOp -> BatchOp
+batchOp _ (FamilyOp 0 k (Just v)) = Put k v
+batchOp _ (FamilyOp 0 k Nothing) = Del k
+batchOp db (FamilyOp n k mv) = case drop (n - 1) (columnFamilies db) of
+  cf : _ -> maybe (DelCF cf k) (PutCF cf k) mv
+  [] -> error ("no column family " <> show n)
+
+-- | Every entry of every column family of a database, the default one
+-- first.
+contents :: DB -> IO [[(ByteString, ByteString)]]
+contents db = (:) <$> withIter db forwards <*> forM (columnFamilies db) (\cf -> withIterCF db cf forwards)
+
+-- | Two new databases with the same three column families besides the
+-- default: one to write with 'write', and one with 'writePacked'.
+withTwoDBs :: (DB -> DB -> IO a) -> IO a
+withTwoDBs go = new (new . go)
+  where
+    families = map (,plain) ["one", "two", "three"]
+    new f = withTempPath $ \path -> withDBCF path plain {createMissingColumnFamilies = True} families f
+
+-- | Require that the operations, cut into chunks of so many, leave what
+-- they leave when they are written with 'write': in every column family.
+shouldWriteAs :: Int -> [FamilyOp] -> IO ()
+shouldWriteAs size ops = withTwoDBs $ \expected packed -> do
+  write expected (map (batchOp expected) ops)
+  writePacked packed (map packOps (groupsOf size (map (batchOp packed) ops)))
+  written <- contents packed
+  wanted <- contents expected
+  map length written `shouldBe` map length wanted
+  written `shouldBe` wanted
+
+-- | A list in pieces of a length, the last one shorter.
+groupsOf :: Int -> [a] -> [[a]]
+groupsOf _ [] = []
+groupsOf n xs = let (a, b) = splitAt n xs in a : groupsOf n b
+
+-- | A chunk with one record, written as a program that packs its own
+-- chunks does: room for the header, the key and the value after it, and
+-- then the header. The record starts at an odd address, since records are
+-- not aligned.
+record :: Maybe ColumnFamily -> PackedOp -> ByteString -> ByteString -> ByteString
+record mcf op k v =
+  BS.drop 1 . BI.unsafeCreate (1 + size) $ \buffer -> do
+    let start = buffer `plusPtr` 1 :: Ptr Word8
+        key_ptr = start `plusPtr` packedHeaderSize
+    copy k key_ptr
+    copy v (key_ptr `plusPtr` BS.length k)
+    pokePackedHeader start mcf op (BS.length k) (BS.length v)
+  where
+    size = packedHeaderSize + BS.length k + BS.length v
+    copy bytes to =
+      BS.useAsCStringLen bytes $ \(from, len) -> copyBytes to (castPtr from) len
+
+-- | Replace the bytes at an offset.
+patch :: Int -> [Word8] -> ByteString -> ByteString
+patch at bytes whole = BS.take at whole <> BS.pack bytes <> BS.drop (at + length bytes) whole
+
+-- | A batch that a small C function of the package hands to RocksDB, a few
+-- thousand operations at a call. It has to do what 'write' does with the
+-- same operations, and it reads a buffer that the caller made: so it must
+-- not believe what the buffer says about its own lengths.
+packedSpec :: Spec
+packedSpec = describe "Packed batches" $ do
+  let several =
+        [ FamilyOp 0 "a" (Just "default"),
+          FamilyOp 1 "a" (Just "one"),
+          FamilyOp 2 "a" (Just "two"),
+          FamilyOp 3 "a" (Just "three"),
+          FamilyOp 0 "empty value" (Just ""),
+          FamilyOp 2 "" (Just "empty key"),
+          FamilyOp 3 "zero\0inside" (Just "\0\0"),
+          FamilyOp 1 "gone" (Just "v"),
+          FamilyOp 1 "gone" Nothing,
+          FamilyOp 2 "never there" Nothing
+        ]
+      -- twenty thousand operations over four families: every key is set,
+      -- every third one is set again and every seventh deleted
+      many =
+        concat
+          [ [FamilyOp (i `mod` 4) (key i) (Just (C.pack (show i)))]
+              <> [FamilyOp (i `mod` 4) (key i) (Just "again") | i `mod` 3 == 0]
+              <> [FamilyOp (i `mod` 4) (key i) Nothing | i `mod` 7 == 0]
+          | i <- [1 .. 14000]
+          ]
+  it "writes what the same operations written with write leave, in every column family" $ do
+    shouldWriteAs (length several) several
+    withTwoDBs $ \_ db -> do
+      writePacked db [packOps (map (batchOp db) several)]
+      contents db
+        `shouldReturn` [ [("a", "default"), ("empty value", "")],
+                         [("a", "one")],
+                         [("", "empty key"), ("a", "two")],
+                         [("a", "three"), ("zero\0inside", "\0\0")]
+                       ]
+  it "applies operations in order, within a chunk and from one chunk to the next" $ do
+    let ops =
+          [ FamilyOp 0 "k" (Just "first"),
+            FamilyOp 0 "k" (Just "second"),
+            FamilyOp 1 "gone" (Just "v"),
+            FamilyOp 1 "gone" Nothing,
+            FamilyOp 1 "back" Nothing,
+            FamilyOp 1 "back" (Just "v")
+          ]
+    forM_ [1, 2, 3, 6] $ \size -> do
+      shouldWriteAs size ops
+      withTwoDBs $ \_ db -> do
+        writePacked db (map packOps (groupsOf size (map (batchOp db) ops)))
+        contents db `shouldReturn` [[("k", "second")], [("back", "v")], [], []]
+  it "accepts no chunk, and empty chunks among the others" $
+    withTwoDBs $ \_ db -> do
+      writePacked db []
+      writePacked db [BS.empty]
+      contents db `shouldReturn` [[], [], [], []]
+      writePacked db [BS.empty, packOps [Put "a" "1"], BS.empty, packOps [], packOps [Put "b" "2"]]
+      contents db `shouldReturn` [[("a", "1"), ("b", "2")], [], [], []]
+  it "writes a large batch, in one chunk and over many" $ do
+    length many `shouldSatisfy` (> 20000)
+    shouldWriteAs (length many) many
+    shouldWriteAs 97 many
+    shouldWriteAs 1 (take 3000 many)
+  it "takes records that a program wrote into a buffer of its own" $
+    withTwoDBs $ \_ db -> do
+      other <- firstFamily db
+      packedHeaderSize `shouldBe` BS.length (packOps [Put "" ""])
+      record Nothing PackedPut "key" "value" `shouldBe` packOps [Put "key" "value"]
+      record (Just other) PackedPut "key" "" `shouldBe` packOps [PutCF other "key" ""]
+      record (Just other) PackedDel "key" "" `shouldBe` packOps [DelCF other "key"]
+      put db "old" "v"
+      writePacked
+        db
+        [ record Nothing PackedPut "a" "1" <> record (Just other) PackedPut "b" "2",
+          record Nothing PackedDel "old" ""
+        ]
+      contents db `shouldReturn` [[("a", "1")], [("b", "2")], [], []]
+  it "refuses a header that cannot be: a length that is negative, a delete with a value" $ do
+    evaluate (record Nothing PackedPut "k" "v") `shouldReturn` packOps [Put "k" "v"]
+    evaluate (record Nothing PackedDel "k" "v") `shouldThrow` anyIOException
+    BI.create 64 (\p -> pokePackedHeader p Nothing PackedPut (-1) 0) `shouldThrow` anyIOException
+    BI.create 64 (\p -> pokePackedHeader p Nothing PackedPut 0 (-1)) `shouldThrow` anyIOException
+  describe "A chunk that is not made of whole records" $ do
+    let good = packOps [Put "before" "v"]
+        -- two records of 17 bytes of header, a key of 3 and a value of 5
+        chunk = packOps [Put "aaa" "11111", Put "bbb" "22222"]
+        size = BS.length chunk `div` 2
+        operation = packedHeaderSize - 1
+        key_len = packedHeaderSize - 9
+        value_len = packedHeaderSize - 5
+        -- the chunk is refused, by this package and not by RocksDB, with
+        -- the number of its first bad record, and nothing of the batch is
+        -- written: not the good chunks around it either
+        refused n bad = withTwoDBs $ \_ db -> do
+          writePacked db [good, bad, good] `shouldThrow` \e ->
+            ("writePacked: chunk 1 " `isPrefixOf` ioeGetErrorString e)
+              && ((": record " <> show (n :: Int) <> " is") `isInfixOf` ioeGetErrorString e)
+          writePacked db [bad] `shouldThrow` anyIOException
+          contents db `shouldReturn` [[], [], [], []]
+          -- and the database is still good for a batch
+          writePacked db [good]
+          contents db `shouldReturn` [[("before", "v")], [], [], []]
+    it "is written when nothing is wrong with it" $
+      withTwoDBs $ \_ db -> do
+        writePacked db [good, chunk, good]
+        contents db `shouldReturn` [[("aaa", "11111"), ("bbb", "22222"), ("before", "v")], [], [], []]
+    it "is refused when it ends within a value" $
+      refused 1 (BS.init chunk)
+    it "is refused when it ends within a key" $
+      refused 1 (BS.take (size + packedHeaderSize + 1) chunk)
+    it "is refused when it ends within a header, or right after one" $ do
+      refused 1 (BS.take (size + 1) chunk)
+      refused 1 (BS.take (size + packedHeaderSize - 1) chunk)
+      refused 1 (BS.take (size + packedHeaderSize) chunk)
+      refused 0 (BS.take 1 chunk)
+    it "is refused when bytes follow its last record" $
+      refused 2 (chunk <> "\0")
+    it "is refused when a length says more than there is" $ do
+      refused 1 (patch (size + key_len) [9, 0, 0, 0] chunk)
+      refused 1 (patch (size + value_len) [6, 0, 0, 0] chunk)
+      refused 0 (patch key_len [255, 255, 255, 255] chunk)
+      refused 0 (patch value_len [255, 255, 255, 255] chunk)
+      refused 0 (patch key_len [255, 255, 255, 255] (patch value_len [255, 255, 255, 255] chunk))
+    it "is refused when it names an operation that does not exist" $ do
+      refused 1 (patch (size + operation) [3] chunk)
+      refused 0 (patch operation [255] chunk)
+    it "is refused when a delete has a value" $
+      refused 1 (patch (size + operation) [1] chunk)
+  describe "A merge" $ do
+    -- The binding cannot give a column family a merge operator, so what a
+    -- merge does to a value cannot be tested here. What can be: that the
+    -- record is taken for a merge and handed to RocksDB as one. RocksDB 11
+    -- says so itself, by refusing the batch for want of a merge operator. A
+    -- RocksDB that took such a batch would have a merge under the key, and
+    -- no way to read it.
+    it "is handed to RocksDB as a merge, in the default column family and in another" $
+      withTwoDBs $ \_ db -> do
+        other <- firstFamily db
+        let asMerge chunks reading = do
+              written <- try (writePacked db chunks)
+              case written of
+                Left e -> do
+                  ioeGetErrorString e `shouldSatisfy` (not . ("writePacked" `isPrefixOf`))
+                  ioeGetErrorString e `shouldSatisfy` ("erge" `isInfixOf`)
+                  -- and the put that came with it was not written either
+                  contents db `shouldReturn` [[], [], [], []]
+                Right () -> reading `shouldThrow` anyIOException
+        asMerge [packOps [Put "a" "1"], record Nothing PackedMerge "k" "v"] (get db "k")
+        asMerge [record (Just other) PackedMerge "k" "v", packOps [Put "a" "1"]] (getCF db other "k")
+
+-------------------------------------------------------------------------------
 -- Opening and closing
 -------------------------------------------------------------------------------
 
@@ -1151,6 +1374,10 @@ modelSpec = describe "Agreement with a Map" $ do
   prop "after one batch" $
     forAllOps $ \ops -> inNewDB $ \db -> do
       write db (batchOf ops)
+      shouldHold db (map opKey ops) (model ops)
+  prop "after one packed batch, however it is cut into chunks" $
+    forAllOps $ \ops -> forAll (choose (1, 5)) $ \size -> inNewDB $ \db -> do
+      writePacked db (map packOps (groupsOf size (batchOf ops)))
       shouldHold db (map opKey ops) (model ops)
   prop "after the database is closed and opened again" $
     forAllOps $ \ops -> ioProperty $ withTempPath $ \path -> do
