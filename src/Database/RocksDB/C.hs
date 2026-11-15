@@ -75,6 +75,12 @@ module Database.RocksDB.C
     c_rocksdb_property_value,
     c_rocksdb_property_value_cf,
     c_rocksdb_approximate_sizes,
+    CompactOptions,
+    c_rocksdb_compactoptions_create,
+    c_rocksdb_compactoptions_destroy,
+    c_rocksdb_compactoptions_set_bottommost_level_compaction,
+    c_rocksdb_compact_range_opt,
+    c_rocksdb_compact_range_cf_opt,
     c_rocksdb_destroy_db,
     c_rocksdb_repair_db,
     c_rocksdb_create_iterator,
@@ -116,6 +122,10 @@ module Database.RocksDB.C
     c_rocksdb_block_based_options_set_cache_index_and_filter_blocks,
     c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority,
     c_rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache,
+    c_rocksdb_block_based_options_set_index_type,
+    c_rocksdb_block_based_options_set_partition_filters,
+    c_rocksdb_block_based_options_set_metadata_block_size,
+    c_rocksdb_block_based_options_set_pin_top_level_index_and_filter,
     c_rocksdb_cache_create_lru,
     c_rocksdb_cache_destroy,
     c_rocksdb_slicetransform_create_fixed_prefix,
@@ -195,6 +205,12 @@ type ReadOpts = Ptr LReadOpts
 
 -- | Pointer to options for writes.
 type WriteOpts = Ptr LWriteOpts
+
+-- | Phantom type of the options of a manual compaction.
+data LCompactOptions
+
+-- | Pointer to the options of a manual compaction.
+type CompactOptions = Ptr LCompactOptions
 
 -- | Pointer to a consistent point-in-time view of a database.
 type Snapshot = Ptr LSnapshot
@@ -654,6 +670,46 @@ foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_cache_ind
     BlockBasedOptions ->
     CUChar ->
     IO ()
+
+-- | Binding to @rocksdb_compactoptions_create@.
+foreign import ccall safe "rocksdb/c.h rocksdb_compactoptions_create"
+  c_rocksdb_compactoptions_create :: IO CompactOptions
+
+-- | Binding to @rocksdb_compactoptions_destroy@.
+foreign import ccall safe "rocksdb/c.h rocksdb_compactoptions_destroy"
+  c_rocksdb_compactoptions_destroy :: CompactOptions -> IO ()
+
+-- | Binding to @rocksdb_compactoptions_set_bottommost_level_compaction@.
+foreign import ccall safe "rocksdb/c.h rocksdb_compactoptions_set_bottommost_level_compaction"
+  c_rocksdb_compactoptions_set_bottommost_level_compaction :: CompactOptions -> CUChar -> IO ()
+
+-- | Binding to @rocksdb_compact_range_opt@. A null key leaves that end of
+-- the range open.
+foreign import ccall safe "rocksdb/c.h rocksdb_compact_range_opt"
+  c_rocksdb_compact_range_opt ::
+    RocksDB -> CompactOptions -> CString -> CSize -> CString -> CSize -> IO ()
+
+-- | Binding to @rocksdb_compact_range_cf_opt@. A null key leaves that end
+-- of the range open.
+foreign import ccall safe "rocksdb/c.h rocksdb_compact_range_cf_opt"
+  c_rocksdb_compact_range_cf_opt ::
+    RocksDB -> ColumnFamily -> CompactOptions -> CString -> CSize -> CString -> CSize -> IO ()
+
+-- | Binding to @rocksdb_block_based_options_set_index_type@.
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_index_type"
+  c_rocksdb_block_based_options_set_index_type :: BlockBasedOptions -> CInt -> IO ()
+
+-- | Binding to @rocksdb_block_based_options_set_partition_filters@.
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_partition_filters"
+  c_rocksdb_block_based_options_set_partition_filters :: BlockBasedOptions -> CUChar -> IO ()
+
+-- | Binding to @rocksdb_block_based_options_set_metadata_block_size@.
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_metadata_block_size"
+  c_rocksdb_block_based_options_set_metadata_block_size :: BlockBasedOptions -> Word64 -> IO ()
+
+-- | Binding to @rocksdb_block_based_options_set_pin_top_level_index_and_filter@.
+foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_pin_top_level_index_and_filter"
+  c_rocksdb_block_based_options_set_pin_top_level_index_and_filter :: BlockBasedOptions -> CUChar -> IO ()
 
 -- | Binding to @rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache@.
 foreign import ccall safe "rocksdb/c.h rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache"

@@ -125,6 +125,25 @@ data Config = Config
     -- instead of in memory outside it for every open
     -- file; per column family
     cacheIndexAndFilterBlocks :: !Bool,
+    -- | write the index and the filter of each table file in
+    -- pieces of 4 KiB under a small index of their own, where
+    -- each is otherwise one block that grows with the file: on
+    -- files of 64 MiB the filter is one to three mebibytes and
+    -- the index a few hundred kibibytes. A lookup then loads
+    -- the two pieces that it needs and not megabytes, and a
+    -- block cache far smaller than all the indices and filters
+    -- of the database still serves most lookups from memory.
+    -- Without it, a database with more of them than its cache
+    -- holds loads and drops them at nearly every lookup: a
+    -- millisecond of copying, checksums and decompression
+    -- each, on a disk that is idle. The small top-level index
+    -- of each open file is kept in the cache. It applies to
+    -- the files written from then on; the files that a
+    -- database already has keep their layout until they are
+    -- compacted, and both kinds are read. It costs one more
+    -- lookup in memory for each read. Use it with
+    -- 'cacheIndexAndFilterBlocks'; per column family
+    partitionIndexAndFilters :: !Bool,
     -- | bytes of write-ahead log after which the column
     -- families holding the oldest log are flushed, so it
     -- can be deleted (RocksDB default: four times the
@@ -161,9 +180,15 @@ instance Default Config where
         dbWriteBufferSize = Nothing,
         blockCacheSize = Nothing,
         cacheIndexAndFilterBlocks = False,
+        partitionIndexAndFilters = False,
         maxTotalWalSize = Nothing,
         maxBackgroundJobs = Nothing
       }
+
+-- | @rocksdb_block_based_table_index_type_two_level_index_search@: an index
+-- of the pieces of the index.
+twoLevelIndexSearch :: CInt
+twoLevelIndexSearch = 2
 
 -- | Create RocksDB options from a t'Config' and pass them to a function. The
 -- options are destroyed when it returns.
@@ -174,7 +199,7 @@ withOptions = withOptionsCache Nothing
 -- any. The options are destroyed when the function returns.
 withOptionsCache :: Maybe Cache -> Config -> (Options -> IO a) -> IO a
 withOptionsCache cache Config {..} f = with_opts $ \opts -> do
-  when (bloomFilter || isJust cache || cacheIndexAndFilterBlocks)
+  when (bloomFilter || isJust cache || cacheIndexAndFilterBlocks || partitionIndexAndFilters)
     $ bracket
       c_rocksdb_block_based_options_create
       c_rocksdb_block_based_options_destroy
@@ -187,6 +212,11 @@ withOptionsCache cache Config {..} f = with_opts $ \opts -> do
         c_rocksdb_block_based_options_set_cache_index_and_filter_blocks bo 1
         c_rocksdb_block_based_options_set_cache_index_and_filter_blocks_with_high_priority bo 1
         c_rocksdb_block_based_options_set_pin_l0_filter_and_index_blocks_in_cache bo 1
+      when partitionIndexAndFilters $ do
+        c_rocksdb_block_based_options_set_index_type bo twoLevelIndexSearch
+        c_rocksdb_block_based_options_set_partition_filters bo 1
+        c_rocksdb_block_based_options_set_metadata_block_size bo 4096
+        c_rocksdb_block_based_options_set_pin_top_level_index_and_filter bo 1
       -- the table factory copies the options, filter policy and cache
       c_rocksdb_options_set_block_based_table_factory opts bo
   forM_ prefixLength $ \l -> do

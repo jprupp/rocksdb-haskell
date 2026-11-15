@@ -745,6 +745,41 @@ tuningSpec = describe "Tuning" $ do
         multiGetCF db one (map key [1, 10000, 20000])
           `shouldReturn` replicate 3 (Just value)
         getProperty db BlockCacheUsage >>= (`shouldSatisfy` positive)
+  it "loads a piece of the index and of the filter for a lookup, not all of them" $ do
+    -- One table file of 200,000 keys has a filter of some 250 kB and an
+    -- index of about as much. A lookup in a file that the cache does not
+    -- know loads both whole, or two pieces of 4 KiB.
+    let size = 64 * 1024 * 1024 :: Int
+        whole =
+          tuned
+            { errorIfExists = False,
+              bloomFilter = True,
+              blockCacheSize = Just size,
+              cacheIndexAndFilterBlocks = True
+            }
+        pieces = whole {partitionIndexAndFilters = True}
+        value = C.replicate 20 'v'
+        afterOneLookup cfg =
+          withTempPath $ \path -> do
+            withDBCF path cfg [("one", cfg)] $ \db -> do
+              one <- firstFamily db
+              forM_ [1 .. 200000] $ \i -> putCF db one (key i) value
+            -- opening it writes what was in memory to a file of the first
+            -- level, all of whose index and filter the cache keeps: the
+            -- compaction moves it down, where they are loaded as needed
+            withDBCF path cfg [("one", cfg)] $ \db -> do
+              one <- firstFamily db
+              compactRange db (Just one) Nothing Nothing
+            withDBCF path cfg [("one", cfg)] $ \db -> do
+              one <- firstFamily db
+              getCF db one (key 100000) `shouldReturn` Just value
+              usage <- getProperty db BlockCacheUsage
+              return (maybe 0 (read . C.unpack) usage :: Int)
+    held <- afterOneLookup whole
+    heldInPieces <- afterOneLookup pieces
+    putStrLn $ "block cache after one lookup: " <> show held <> " bytes whole, " <> show heldInPieces <> " in pieces"
+    held `shouldSatisfy` (> 200 * 1024)
+    heldInPieces `shouldSatisfy` (< held `div` 4)
   it "opens with a bound on the write-ahead log" $
     withTempPath $ \path ->
       withDBCF path tuned {maxTotalWalSize = Just (1024 * 1024)} [("one", tuned)] $ \db -> do

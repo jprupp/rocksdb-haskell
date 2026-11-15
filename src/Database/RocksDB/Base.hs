@@ -54,6 +54,7 @@ module Database.RocksDB.Base
     destroy,
     repair,
     approximateSize,
+    compactRange,
 
     -- * Iteration
     module Database.RocksDB.Iterator,
@@ -381,6 +382,40 @@ approximateSize DB {rocksDB = db_ptr} (from, to) =
                     tlen_ptrs
                     size_ptr
                 fromIntegral <$> peek size_ptr
+
+-- | Write again every table file that has keys from the first to the second
+-- of the two given, in the default column family or in the one given, and
+-- return when it is done. 'Nothing' leaves that end of the range open, so
+-- two of them are the whole column family.
+--
+-- RocksDB compacts by itself, and a program does not need this to keep a
+-- database in order. It is for the one thing that only a rewrite does:
+-- giving the files that a database already has the layout of its present
+-- t'Config', such as a Bloom filter or 'partitionIndexAndFilters', which
+-- otherwise reach a file only when RocksDB happens to compact it, and the
+-- files of the last level, which hold most of the data, rarely are. Every
+-- file in the range is written, those of the last level included.
+--
+-- It reads and writes all the data in the range, with the background
+-- threads of the database ('maxBackgroundJobs'): hours on a large one, and
+-- room on the disk for the files being written until the old ones are
+-- deleted. The database can be read and written meanwhile. RocksDB reports
+-- no error from it; what it could not do stays as it was.
+compactRange :: DB -> Maybe ColumnFamily -> Maybe ByteString -> Maybe ByteString -> IO ()
+compactRange DB {rocksDB = db_ptr} mcf from to =
+  bracket c_rocksdb_compactoptions_create c_rocksdb_compactoptions_destroy $ \opts -> do
+    c_rocksdb_compactoptions_set_bottommost_level_compaction opts forceOptimized
+    bound from $ \(from_ptr, flen) ->
+      bound to $ \(to_ptr, tlen) ->
+        case mcf of
+          Just cf -> c_rocksdb_compact_range_cf_opt db_ptr cf opts from_ptr flen to_ptr tlen
+          Nothing -> c_rocksdb_compact_range_opt db_ptr opts from_ptr flen to_ptr tlen
+  where
+    -- @BottommostLevelCompaction::kForceOptimized@: the files of the last
+    -- level too, but not those that this compaction has just written
+    forceOptimized = 3
+    bound Nothing f = f (nullPtr, 0)
+    bound (Just k) f = BU.unsafeUseAsCStringLen k $ \(p, n) -> f (p, intToCSize n)
 
 -- | Write a key/value pair to the default column family, replacing any
 -- previous value. Throws an 'IOError' on failure.

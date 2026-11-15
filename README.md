@@ -496,6 +496,7 @@ yet, so in practice they are only usable from inside the library.
 | `bloomFilter`                 | column family   | Full Bloom filter with 10 bits per key                          |
 | `prefixLength`                | column family   | Length of a fixed key prefix for the prefix extractor           |
 | `cacheIndexAndFilterBlocks`   | column family   | Keep index and filter blocks in the block cache                 |
+| `partitionIndexAndFilters`    | column family   | Write index and filter in 4 KiB pieces, loaded as needed        |
 
 Database-wide fields are ignored in the configuration of a column family.
 
@@ -542,7 +543,7 @@ every open file and every memtable can grow without bound.
 | Bounded iterators        | `IterConfig`, `withIterConfig`, `createIteratorConfig`, `prefixUpperBound` |
 | Moving iterators         | `iterSeek`, `iterFirst`, `iterLast`, `iterNext`, `iterPrev`    |
 | Reading from iterators   | `iterKey`, `iterValue`, `iterEntry`, `iterValid`, `iterGetError` |
-| Administration           | `getProperty`, `getPropertyCF`, `approximateSize`, `destroy`, `repair` |
+| Administration           | `getProperty`, `getPropertyCF`, `approximateSize`, `compactRange`, `destroy`, `repair` |
 
 The FFI bindings (`Database.RocksDB.C`) and helpers (`Database.RocksDB.Internal`)
 are hidden modules.

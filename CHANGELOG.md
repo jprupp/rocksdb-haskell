@@ -7,9 +7,24 @@
    given more. More threads only help where the disk and the cores have room
    for them: a compaction that already waits for a slow disk is not made
    faster by a second one, and both take from the reads.
- * The `Config` record has a new field, so code that builds one without
-   `def` has to set it; code that starts from `def` needs no change. This is
-   why the version is 2.8.0 and not 2.7.2.
+ * `partitionIndexAndFilters`, another new field of `Config`: the index and
+   the filter of each table file are written in pieces of 4 KiB under a small
+   index of their own. Each is otherwise one block that grows with the file,
+   megabytes for a file of 64 MiB with a filter, and a database that has more
+   of them than its block cache holds loads and drops them at nearly every
+   lookup. Measured on a database of 1.6 TB with a cache of 1 GiB: the cache
+   held the index and filter of 400 of 32,000 files and three megabytes of
+   data, and a lookup took 0.8 ms of processor time on an idle disk. With
+   pieces, a lookup loads the two that it needs. It applies to files written
+   from then on; existing files keep their layout until compacted.
+ * `compactRange` writes again every table file of a range of keys, those of
+   the last level included, so that the files a database already has get the
+   layout of its present `Config`: a Bloom filter, or
+   `partitionIndexAndFilters`. RocksDB's own compactions rarely reach the
+   last level, where most of the data is.
+ * The `Config` record has new fields, so code that builds one without `def`
+   has to set them; code that starts from `def` needs no change. This is why
+   the version is 2.8.0 and not 2.7.2.
 
 ## 2.7.1
 
