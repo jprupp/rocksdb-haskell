@@ -1,3 +1,13 @@
+## Unreleased
+
+### Changed
+- CI runs through the workflow that the Haskell packages of jprupp share in
+  [jprupp/tools](https://github.com/jprupp/tools), with the check of
+  `stack.yaml` for local paths (`check-stack-paths`) and the cache of the
+  Nix build kept per release of nixpkgs.
+- `scripts/reject-local-path-deps.sh` is gone: `check-stack-paths`, from
+  jprupp/tools, replaces it.
+
 ## 2.8.0
 
  * `maxBackgroundJobs`, a new field of `Config`: how many threads RocksDB may
